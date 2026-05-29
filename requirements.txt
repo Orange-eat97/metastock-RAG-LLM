@@ -1,0 +1,9 @@
+llama-index
+chromadb
+llama-index-vector-stores-chroma
+llama-index-embeddings-huggingface
+sentence-transformers
+python-dotenv
+pydantic
+numpy==1.26.4
+ollama
