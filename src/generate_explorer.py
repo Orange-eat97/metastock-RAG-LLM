@@ -2,44 +2,53 @@ import argparse
 import json
 from typing import Any
 
-from dotenv import load_dotenv
-from pydantic import BaseModel, Field
+from dotenv import load_dotenv, parser
+from pydantic import BaseModel, Field, field_validator
 
 from llama_index.core import Settings
 from llama_index.llms.openai import OpenAI
 
 from src.context_builder import build_context_for_query
 from src.validator import validate_explorer_output
+from src.explorer_excel_store import save_explorer_output_to_excel
 
 
 load_dotenv()
 
 
-class ExplorerColumn(BaseModel):
-    letter: str = Field(description="Explorer column letter, e.g. A, B, C")
-    name: str = Field(description="Short column name, e.g. Close, RSI14, MA50")
-    formula: str = Field(description="MetaStock formula for this column")
+VALID_COL_LETTERS = set("ABCDEFGHIJKL")
+MODEL = "gpt-5.5"
+
+
+class ColDefinition(BaseModel):
+    col_letter: str = Field(
+        description="Explorer column letter from A to L"
+    )
+    col_code: str = Field(
+        description="MetaStock formula code body for this column, not natural language"
+    )
+
+    @field_validator("col_letter")
+    @classmethod
+    def validate_col_letter(cls, value: str) -> str:
+        letter = value.strip().upper()
+        if letter not in VALID_COL_LETTERS:
+            raise ValueError("col_letter must be one of A through L.")
+        return letter
 
 
 class ExplorerOutput(BaseModel):
-    strategy_name: str = Field(
-        description="Short readable strategy/explorer name suitable for MetaStock"
+    explorer_name: str = Field(
+        description="Short readable explorer name suitable for MetaStock. This maps to explorer_body.explorer_name."
     )
-    description: str = Field(
-        description="One or two sentence description of what this Explorer does"
+    explorer_description: str = Field(
+        description="Optional explanation for the Explorer. This maps to explorer_body.explorer_description."
     )
-    interpretation: str = Field(
-        description="How the user query was interpreted"
+    explorer_code_body: str = Field(
+        description="Actual MetaStock Explorer Filter code body. Do not include the word Filter:"
     )
-    columns: list[ExplorerColumn]
-    filter_code: str = Field(
-        description="MetaStock Explorer Filter code body only, without the word Filter:"
-    )
-    explorer_summary: str = Field(
-        description="Human-readable summary containing Column A/B/C lines and Filter line"
-    )
-    notes: list[str] = Field(
-        description="Assumptions, warnings, or defaults used"
+    col_definitions: list[ColDefinition] = Field(
+        description="Column definitions for this Explorer. Each maps to col_definitions."
     )
 
 
@@ -48,65 +57,78 @@ def build_prompt(user_query: str, context: str) -> str:
 You are a MetaStock Explorer formula generator.
 
 Your task:
-Convert the user's natural language request into MetaStock Explorer columns and filter.
+Convert the user's natural language request into a MetaStock Explorer object.
 
-Use the context below.
+Use the provided context only.
 
 Generation priorities:
-1. Generate syntax that is likely to run in MetaStock Explorer.
+1. Generate MetaStock syntax that is likely to run in MetaStock Explorer.
 2. Use price field abbreviations from base context: C, O, H, L, V, OI.
-3. Use Explorer column/filter rules from base context.
-4. Use dynamically retrieved function cards for formula logic.
-5. Do not invent unsupported functions.
-6. Prefer simple formulas.
-7. Define columns before referencing them.
-8. The filter may reference ColA, ColB, ColC, etc.
-9. Do not use Ref(ColA,-1). Instead define a column such as Ref(C,-1).
-10. If the user omits a common default, state the assumption in notes.
+3. Use dynamically retrieved function cards for formula logic.
+4. Do not invent unsupported MetaStock functions.
+5. Prefer simple formulas.
+6. Use AND and OR, not && or ||.
+7. Use = for equality, not ==.
+8. If the user omits a common default, state the assumption by reflecting it in the description.
 
-Output must be valid JSON matching this schema:
+Output must be valid JSON matching this exact schema:
 
 {{
-  "strategy_name": "string",
-  "description": "string",
-  "interpretation": "string",
-  "columns": [
+  "explorer_name": "string",
+  "explorer_description": "string",
+  "explorer_code_body": "string",
+  "col_definitions": [
     {{
-      "letter": "A",
-      "name": "string",
-      "formula": "string"
+      "col_letter": "A",
+      "col_code": "string"
     }}
-  ],
-  "filter_code": "string",
-  "explorer_summary": "string",
-  "notes": ["string"]
+  ]
 }}
 
-Field rules:
-- strategy_name should be short and suitable as a MetaStock Explorer name.
-- description should explain what the strategy scans for.
-- columns must contain the Explorer columns to define.
-- column letters must start from A and continue sequentially: A, B, C, D...
-- formula must contain only the formula body for that column.
-- filter_code must contain only the MetaStock Filter formula body.
-- Do not include "Filter:" inside filter_code.
-- explorer_summary should contain a readable version like:
-  Column A: C
-  Column B: RSI(14)
-  Column C: Mov(C,50,S)
-  Filter: ColB < 30 AND ColA > ColC
+Database and automator contract:
+- explorer_name maps to explorer_body.explorer_name.
+- explorer_description maps to explorer_body.explorer_description.
+- explorer_code_body maps to explorer_body.explorer_code_body.
+- col_definitions maps to the col_definitions table.
+- col_letter must be one uppercase letter from A to L.
+- col_code must be the MetaStock formula body for that column.
+- explorer_code_body must be the actual MetaStock Explorer Filter code body to paste into the Filter editor.
+- explorer_code_body may be independent from col_definitions.
+- Prefer direct formulas in explorer_code_body, for example RSI(14) < 30.
+- Do not include "Filter:" inside explorer_code_body.
+- Do not include "col A =" inside col_code.
+- Do not include natural language inside explorer_code_body or col_code.
+
+Column definition examples:
+- If col_letter is A and col_code is RSI(14), the automator can construct: col A = RSI(14)
+- If col_letter is B and col_code is Mov(C,50,S), the automator can construct: col B = Mov(C,50,S)
+
+Good output example:
+{{
+  "explorer_name": "RSI Below 30",
+  "explorer_description": "Finds stocks where RSI is below 30, indicating potential oversold conditions.",
+  "explorer_code_body": "RSI(14) < 30",
+  "col_definitions": [
+    {{
+      "col_letter": "A",
+      "col_code": "RSI(14)"
+    }}
+  ]
+}}
 
 Context:
 {context}
 
 User request:
 {user_query}
+
+Return JSON only.
 """.strip()
 
 
 def generate_with_openai(prompt: str) -> dict[str, Any]:
     Settings.llm = OpenAI(
-        model="gpt-4o-mini",
+        model=MODEL,
         temperature=0,
     )
 
@@ -140,6 +162,18 @@ def parse_args() -> argparse.Namespace:
         help="In dry-run mode, print the full prompt. This can be very long.",
     )
 
+    parser.add_argument(
+    "--no-save",
+    action="store_true",
+    help="Do not save generated JSON output to local Excel.",
+    )
+
+    parser.add_argument(
+    "--excel-path",
+    default="data/explorer_outputs.xlsx",
+    help="Path to local Excel output file.",
+    )
+
     return parser.parse_args()
 
 
@@ -171,6 +205,8 @@ def run_one_query(
     user_query: str,
     dry_run: bool = False,
     show_prompt: bool = False,
+    save_output: bool = True,
+    excel_path: str = "data/explorer_outputs.xlsx",
 ) -> None:
     print("\n[generate_explorer] Building context...")
     context, dynamic_items = build_context_for_query(user_query)
@@ -210,6 +246,17 @@ def run_one_query(
     else:
         print("[PASSED]")
 
+        if save_output:
+            saved_path = save_explorer_output_to_excel(
+            output=output,
+            user_query=user_query,
+            backend="openai",
+            model=MODEL,
+            validation_errors=errors,
+            excel_path=excel_path,
+        )
+        print(f"\n[generate_explorer] Saved output to: {saved_path}")
+
 
 def main() -> None:
     args = parse_args()
@@ -220,6 +267,8 @@ def main() -> None:
             user_query,
             dry_run=args.dry_run,
             show_prompt=args.show_prompt,
+            save_output=not args.no_save,
+            excel_path=args.excel_path,
         )
         return
 
@@ -238,6 +287,8 @@ def main() -> None:
             user_query,
             dry_run=args.dry_run,
             show_prompt=args.show_prompt,
+            save_output=not args.no_save,
+            excel_path=args.excel_path,
         )
 
 
