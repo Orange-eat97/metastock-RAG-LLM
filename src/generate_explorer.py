@@ -1,8 +1,11 @@
 import argparse
 import json
+import subprocess
+import sys
+from pathlib import Path
 from typing import Any
 
-from dotenv import load_dotenv, parser
+from dotenv import load_dotenv
 from pydantic import BaseModel, Field, field_validator
 
 from llama_index.core import Settings
@@ -18,6 +21,10 @@ load_dotenv()
 
 VALID_COL_LETTERS = set("ABCDEFGHIJKL")
 MODEL = "gpt-5.5"
+
+DEFAULT_EXCEL_PATH = "data/explorer_outputs.xlsx"
+DEFAULT_AUTOMATOR_MAIN_DIR = Path(r"C:\GitHub\metastock-automator\main")
+DEFAULT_AUTOMATOR_RUNNER = DEFAULT_AUTOMATOR_MAIN_DIR / "runLatestLlmResult.py"
 
 
 class ColDefinition(BaseModel):
@@ -139,6 +146,64 @@ def generate_with_openai(prompt: str) -> dict[str, Any]:
     return output.model_dump()
 
 
+def call_automator_latest_llm_result(
+    *,
+    excel_path: str | Path,
+    automator_runner: str | Path = DEFAULT_AUTOMATOR_RUNNER,
+    instruments: str = "all",
+    max_wait: int = 300,
+    dry_run: bool = False,
+    allow_invalid: bool = False,
+) -> None:
+    """
+    Calls the automator-side bridge.
+
+    The automator reads the latest row from the Excel file's full_output_json column.
+    """
+    runner_path = Path(automator_runner)
+    automator_main_dir = runner_path.parent
+
+    if not runner_path.exists():
+        raise FileNotFoundError(f"Automator runner not found: {runner_path}")
+
+    resolved_excel_path = Path(excel_path).resolve()
+
+    if not resolved_excel_path.exists():
+        raise FileNotFoundError(f"Excel output file not found: {resolved_excel_path}")
+
+    cmd = [
+        sys.executable,
+        str(runner_path),
+        "--excel-path",
+        str(resolved_excel_path),
+        "--instruments",
+        instruments,
+        "--max-wait",
+        str(max_wait),
+    ]
+
+    if dry_run:
+        cmd.append("--dry-run")
+
+    if allow_invalid:
+        cmd.append("--allow-invalid")
+
+    print("\n=== Calling MetaStock Automator ===")
+    print(" ".join(f'"{part}"' if " " in part else part for part in cmd))
+    print()
+
+    completed = subprocess.run(
+        cmd,
+        cwd=str(automator_main_dir),
+        text=True,
+    )
+
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"Automator failed with exit code {completed.returncode}."
+        )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Generate MetaStock Explorer columns/filter from natural language."
@@ -163,15 +228,52 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
-    "--no-save",
-    action="store_true",
-    help="Do not save generated JSON output to local Excel.",
+        "--no-save",
+        action="store_true",
+        help="Do not save generated JSON output to local Excel.",
     )
 
     parser.add_argument(
-    "--excel-path",
-    default="data/explorer_outputs.xlsx",
-    help="Path to local Excel output file.",
+        "--excel-path",
+        default=DEFAULT_EXCEL_PATH,
+        help="Path to local Excel output file.",
+    )
+
+    parser.add_argument(
+        "--run-automator",
+        action="store_true",
+        help="After saving generated JSON output to Excel, call the MetaStock automator.",
+    )
+
+    parser.add_argument(
+        "--automator-dry-run",
+        action="store_true",
+        help="Call the automator in dry-run mode. Only prints the automator request.",
+    )
+
+    parser.add_argument(
+        "--automator-runner",
+        default=str(DEFAULT_AUTOMATOR_RUNNER),
+        help="Path to automator runner script, usually runLatestLlmResult.py.",
+    )
+
+    parser.add_argument(
+        "--instruments",
+        default="all",
+        help="Instrument selection passed to automator. Example: all, SGX, or SGX,NASDAQ.",
+    )
+
+    parser.add_argument(
+        "--automator-max-wait",
+        type=int,
+        default=300,
+        help="Maximum seconds automator should wait for exploration execution.",
+    )
+
+    parser.add_argument(
+        "--allow-invalid",
+        action="store_true",
+        help="Allow automator to read latest row even if validation_passed is false.",
     )
 
     return parser.parse_args()
@@ -206,8 +308,19 @@ def run_one_query(
     dry_run: bool = False,
     show_prompt: bool = False,
     save_output: bool = True,
-    excel_path: str = "data/explorer_outputs.xlsx",
+    excel_path: str = DEFAULT_EXCEL_PATH,
+    run_automator: bool = False,
+    automator_dry_run: bool = False,
+    automator_runner: str = str(DEFAULT_AUTOMATOR_RUNNER),
+    instruments: str = "all",
+    automator_max_wait: int = 300,
+    allow_invalid: bool = False,
 ) -> None:
+    if run_automator and not save_output:
+        raise ValueError(
+            "--run-automator requires saving to Excel. Remove --no-save."
+        )
+
     print("\n[generate_explorer] Building context...")
     context, dynamic_items = build_context_for_query(user_query)
 
@@ -246,8 +359,10 @@ def run_one_query(
     else:
         print("[PASSED]")
 
-        if save_output:
-            saved_path = save_explorer_output_to_excel(
+    saved_path: Path | None = None
+
+    if save_output:
+        saved_path = save_explorer_output_to_excel(
             output=output,
             user_query=user_query,
             backend="openai",
@@ -256,6 +371,25 @@ def run_one_query(
             excel_path=excel_path,
         )
         print(f"\n[generate_explorer] Saved output to: {saved_path}")
+
+    if run_automator:
+        if saved_path is None:
+            raise RuntimeError("Automator requested but no Excel file was saved.")
+
+        if errors and not allow_invalid:
+            raise RuntimeError(
+                "Generated Explorer failed validation, so automator was not called. "
+                "Use --allow-invalid only if you intentionally want to test invalid output."
+            )
+
+        call_automator_latest_llm_result(
+            excel_path=saved_path,
+            automator_runner=automator_runner,
+            instruments=instruments,
+            max_wait=automator_max_wait,
+            dry_run=automator_dry_run,
+            allow_invalid=allow_invalid,
+        )
 
 
 def main() -> None:
@@ -269,6 +403,12 @@ def main() -> None:
             show_prompt=args.show_prompt,
             save_output=not args.no_save,
             excel_path=args.excel_path,
+            run_automator=args.run_automator,
+            automator_dry_run=args.automator_dry_run,
+            automator_runner=args.automator_runner,
+            instruments=args.instruments,
+            automator_max_wait=args.automator_max_wait,
+            allow_invalid=args.allow_invalid,
         )
         return
 
@@ -289,6 +429,12 @@ def main() -> None:
             show_prompt=args.show_prompt,
             save_output=not args.no_save,
             excel_path=args.excel_path,
+            run_automator=args.run_automator,
+            automator_dry_run=args.automator_dry_run,
+            automator_runner=args.automator_runner,
+            instruments=args.instruments,
+            automator_max_wait=args.automator_max_wait,
+            allow_invalid=args.allow_invalid,
         )
 
 
