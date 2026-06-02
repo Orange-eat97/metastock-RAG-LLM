@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import queue
 import subprocess
 import sys
@@ -7,8 +8,9 @@ import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import ttk, messagebox
-import ctypes
 
+
+# Make Tkinter sharper on Windows high-DPI displays.
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(1)
 except Exception:
@@ -18,22 +20,32 @@ except Exception:
         pass
 
 
-REPO_ROOT = Path(__file__).resolve().parent
+REPO_ROOT = Path(r"C:\GitHub\metastock-RAG-LLM")
 
 
 class MetaStockLLMGui:
     def __init__(self) -> None:
         self.root = tk.Tk()
+        self.root.tk.call("tk", "scaling", 1.25)
+
         self.root.title("MetaStock LLM Automator")
-        self.root.geometry("920x720")
-        self.root.minsize(760, 560)
+        self.root.geometry("980x760")
+        self.root.minsize(820, 620)
 
         self.output_queue: queue.Queue[str] = queue.Queue()
         self.worker: threading.Thread | None = None
         self.process: subprocess.Popen | None = None
 
         self.prompt_var = tk.StringVar()
-        self.run_automator_var = tk.BooleanVar(value=True)
+
+        # LLM / storage options
+        self.save_excel_var = tk.BooleanVar(value=True)
+        self.save_supabase_var = tk.BooleanVar(value=True)
+        self.use_supabase_cache_var = tk.BooleanVar(value=True)
+        self.cache_any_model_var = tk.BooleanVar(value=False)
+
+        # Automator options
+        self.run_automator_var = tk.BooleanVar(value=False)
         self.automator_dry_run_var = tk.BooleanVar(value=True)
         self.instruments_var = tk.StringVar(value="all")
 
@@ -42,6 +54,10 @@ class MetaStockLLMGui:
 
     def run(self) -> None:
         self.root.mainloop()
+
+    # ============================================================
+    # UI
+    # ============================================================
 
     def _build_ui(self) -> None:
         main = ttk.Frame(self.root, padding=16)
@@ -54,32 +70,88 @@ class MetaStockLLMGui:
         )
         title.pack(anchor="w", pady=(0, 12))
 
-        input_frame = ttk.LabelFrame(main, text="Prompt", padding=10)
-        input_frame.pack(fill="x", pady=(0, 12))
+        # ------------------------------------------------------------
+        # Prompt
+        # ------------------------------------------------------------
 
-        self.prompt_entry = ttk.Entry(input_frame, textvariable=self.prompt_var)
+        prompt_frame = ttk.LabelFrame(main, text="Prompt", padding=10)
+        prompt_frame.pack(fill="x", pady=(0, 12))
+
+        self.prompt_entry = ttk.Entry(prompt_frame, textvariable=self.prompt_var)
         self.prompt_entry.pack(fill="x", pady=(0, 8))
         self.prompt_entry.bind("<Return>", lambda _event: self._on_start_clicked())
 
-        options = ttk.Frame(input_frame)
-        options.pack(fill="x")
+        hint = ttk.Label(
+            prompt_frame,
+            text=(
+                "Example: Find stocks where RSI is below 30 and close is above "
+                "50 day moving average"
+            ),
+            foreground="#555555",
+        )
+        hint.pack(anchor="w")
+
+        # ------------------------------------------------------------
+        # Storage / cache options
+        # ------------------------------------------------------------
+
+        storage_frame = ttk.LabelFrame(main, text="Storage and Cache", padding=10)
+        storage_frame.pack(fill="x", pady=(0, 12))
 
         ttk.Checkbutton(
-            options,
+            storage_frame,
+            text="Save to Excel",
+            variable=self.save_excel_var,
+        ).pack(side="left", padx=(0, 18))
+
+        ttk.Checkbutton(
+            storage_frame,
+            text="Save to Supabase",
+            variable=self.save_supabase_var,
+        ).pack(side="left", padx=(0, 18))
+
+        ttk.Checkbutton(
+            storage_frame,
+            text="Use Supabase cache",
+            variable=self.use_supabase_cache_var,
+        ).pack(side="left", padx=(0, 18))
+
+        ttk.Checkbutton(
+            storage_frame,
+            text="Cache any model",
+            variable=self.cache_any_model_var,
+        ).pack(side="left")
+
+        # ------------------------------------------------------------
+        # Automator options
+        # ------------------------------------------------------------
+
+        automator_frame = ttk.LabelFrame(main, text="Automator", padding=10)
+        automator_frame.pack(fill="x", pady=(0, 12))
+
+        ttk.Checkbutton(
+            automator_frame,
             text="Run automator after generation",
             variable=self.run_automator_var,
-        ).pack(side="left", padx=(0, 16))
+        ).pack(side="left", padx=(0, 18))
 
         ttk.Checkbutton(
-            options,
+            automator_frame,
             text="Automator dry run",
             variable=self.automator_dry_run_var,
-        ).pack(side="left", padx=(0, 16))
+        ).pack(side="left", padx=(0, 18))
 
-        ttk.Label(options, text="Instruments:").pack(side="left")
-        ttk.Entry(options, textvariable=self.instruments_var, width=18).pack(
-            side="left", padx=(6, 0)
-        )
+        ttk.Label(automator_frame, text="Instruments:").pack(side="left")
+
+        ttk.Entry(
+            automator_frame,
+            textvariable=self.instruments_var,
+            width=20,
+        ).pack(side="left", padx=(6, 0))
+
+        # ------------------------------------------------------------
+        # Buttons
+        # ------------------------------------------------------------
 
         buttons = ttk.Frame(main)
         buttons.pack(fill="x", pady=(0, 10))
@@ -108,6 +180,10 @@ class MetaStockLLMGui:
         self.status_var = tk.StringVar(value="Ready")
         ttk.Label(main, textvariable=self.status_var).pack(anchor="w", pady=(0, 6))
 
+        # ------------------------------------------------------------
+        # Log box
+        # ------------------------------------------------------------
+
         log_frame = ttk.LabelFrame(main, text="Process Log", padding=8)
         log_frame.pack(fill="both", expand=True)
 
@@ -118,33 +194,94 @@ class MetaStockLLMGui:
         scrollbar.pack(side="right", fill="y")
         self.log_box.configure(yscrollcommand=scrollbar.set)
 
+    # ============================================================
+    # Command construction
+    # ============================================================
+
     def _build_command(self, prompt: str) -> list[str]:
         cmd = [
             sys.executable,
             "-m",
             "src.generate_explorer",
             prompt,
-            "--instruments",
-            self.instruments_var.get().strip() or "all",
         ]
 
+        # Excel saving
+        if not self.save_excel_var.get():
+            cmd.append("--no-save")
+
+        # Supabase saving
+        if self.save_supabase_var.get():
+            cmd.append("--save-supabase")
+
+        # Supabase cache
+        if self.use_supabase_cache_var.get():
+            cmd.append("--use-supabase-cache")
+
+        if self.cache_any_model_var.get():
+            cmd.append("--cache-any-model")
+
+        # Automator
         if self.run_automator_var.get():
             cmd.append("--run-automator")
 
         if self.automator_dry_run_var.get():
             cmd.append("--automator-dry-run")
 
+        instruments = self.instruments_var.get().strip() or "all"
+        cmd.extend(["--instruments", instruments])
+
         return cmd
+    
+    def _clean_prompt(self, prompt: str) -> str:
+        """
+        Remove accidental wrapping quotes from GUI input.
+
+        Examples:
+            "Find stocks..."  -> Find stocks...
+            'Find stocks...'  -> Find stocks...
+            ""Find stocks..."" -> Find stocks...
+        """
+        text = (prompt or "").strip()
+
+        changed = True
+        while changed and len(text) >= 2:
+            changed = False
+
+            if text.startswith('"') and text.endswith('"'):
+                text = text[1:-1].strip()
+                changed = True
+
+            if text.startswith("'") and text.endswith("'"):
+                text = text[1:-1].strip()
+                changed = True
+
+        return text
+
+    # ============================================================
+    # Event handlers
+    # ============================================================
 
     def _on_start_clicked(self) -> None:
         if self.worker and self.worker.is_alive():
             messagebox.showinfo("MetaStock LLM Automator", "A run is already active.")
             return
 
-        prompt = self.prompt_var.get().strip()
+        prompt = self._clean_prompt(self.prompt_var.get())
 
         if not prompt:
             messagebox.showerror("Missing prompt", "Please enter a prompt.")
+            return
+
+        if self.run_automator_var.get() and not self.save_excel_var.get():
+            messagebox.showerror(
+                "Invalid option combination",
+                (
+                    "The current automator bridge still reads from Excel. "
+                    "Keep 'Save to Excel' enabled when running automator.\n\n"
+                    "Later, after the Supabase API bridge is implemented, this restriction can be removed."
+                ),
+            )
             return
 
         cmd = self._build_command(prompt)
@@ -169,6 +306,10 @@ class MetaStockLLMGui:
             self._append_log("\n[GUI] Stopping process...\n")
             self.process.terminate()
             self.status_var.set("Stopping...")
+
+    # ============================================================
+    # Subprocess / log streaming
+    # ============================================================
 
     def _run_subprocess(self, cmd: list[str]) -> None:
         try:
