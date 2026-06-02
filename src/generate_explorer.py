@@ -4,6 +4,10 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+from src.supabase_store import (
+    find_cached_explorer_output_by_query,
+    save_explorer_output_to_supabase,
+)
 
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field, field_validator
@@ -276,6 +280,30 @@ def parse_args() -> argparse.Namespace:
         help="Allow automator to read latest row even if validation_passed is false.",
     )
 
+    parser.add_argument(
+        "--save-supabase",
+        action="store_true",
+        help="Save generated Explorer output to Supabase.",
+    )
+
+    parser.add_argument(
+        "--use-supabase-cache",
+        action="store_true",
+        help=(
+            "Before calling the LLM, check Supabase for the exact same user_query "
+            "and reuse the stored output if found."
+        ),
+    )
+
+    parser.add_argument(
+        "--cache-any-model",
+        action="store_true",
+        help=(
+            "When using Supabase cache, allow cached outputs from any model. "
+            "By default, cache is restricted to the current MODEL."
+        ),
+    )
+
     return parser.parse_args()
 
 
@@ -309,6 +337,9 @@ def run_one_query(
     show_prompt: bool = False,
     save_output: bool = True,
     excel_path: str = DEFAULT_EXCEL_PATH,
+    save_supabase: bool = False,
+    use_supabase_cache: bool = False,
+    cache_any_model: bool = False,
     run_automator: bool = False,
     automator_dry_run: bool = False,
     automator_runner: str = str(DEFAULT_AUTOMATOR_RUNNER),
@@ -342,6 +373,72 @@ def run_one_query(
             print("\n[DRY RUN] LLM call skipped. Use --show-prompt to print the full prompt.")
         return
 
+        cached_row: dict[str, Any] | None = None
+    cached_explorer_id: str | None = None
+
+    if use_supabase_cache:
+        print("\n[generate_explorer] Checking Supabase cache for exact user_query match...")
+
+        cached_row = find_cached_explorer_output_by_query(
+            user_query=user_query,
+            require_validation_passed=True,
+            model=None if cache_any_model else MODEL,
+        )
+
+        if cached_row:
+            cached_explorer_id = str(cached_row["id"])
+            output = cached_row["full_output_json"]
+
+            print("[generate_explorer] Supabase cache hit. GPT call skipped.")
+            print(f"[generate_explorer] cached explorer_id: {cached_explorer_id}")
+            print(f"[generate_explorer] cached created_at: {cached_row.get('created_at')}")
+
+            print("\n=== Explorer Output ===")
+            print(json.dumps(output, indent=2))
+
+            errors = validate_explorer_output(output)
+
+            print("\n=== Validation ===")
+            if errors:
+                print("[FAILED]")
+                for e in errors:
+                    print(f"- {e}")
+            else:
+                print("[PASSED]")
+
+            # Optional: still export cached result to Excel for local visibility.
+            saved_path: Path | None = None
+
+            if save_output:
+                saved_path = save_explorer_output_to_excel(
+                    output=output,
+                    user_query=user_query,
+                    backend=str(cached_row.get("backend") or "supabase-cache"),
+                    model=str(cached_row.get("model") or MODEL),
+                    validation_errors=errors,
+                    excel_path=excel_path,
+                )
+                print(f"\n[generate_explorer] Saved cached output to Excel: {saved_path}")
+
+            if run_automator:
+                if saved_path is None:
+                    raise RuntimeError(
+                        "Automator currently needs Excel bridge. Keep save_output=True."
+                    )
+
+                call_automator_latest_llm_result(
+                    excel_path=saved_path,
+                    automator_runner=automator_runner,
+                    instruments=instruments,
+                    max_wait=automator_max_wait,
+                    dry_run=automator_dry_run,
+                    allow_invalid=allow_invalid,
+                )
+
+            return
+
+        print("[generate_explorer] Supabase cache miss. Calling GPT.")
+    
     print("\n[generate_explorer] Calling LLM...")
 
     output = generate_with_openai(prompt)
@@ -372,6 +469,20 @@ def run_one_query(
         )
         print(f"\n[generate_explorer] Saved output to: {saved_path}")
 
+    explorer_id: str | None = None
+
+    if save_supabase:
+        explorer_id = save_explorer_output_to_supabase(
+            output=output,
+            user_query=user_query,
+            backend="openai",
+            model=MODEL,
+            validation_errors=errors,
+        )
+
+        print(f"\n[generate_explorer] Saved output to Supabase.")
+        print(f"[generate_explorer] explorer_id: {explorer_id}")
+
     if run_automator:
         if saved_path is None:
             raise RuntimeError("Automator requested but no Excel file was saved.")
@@ -399,16 +510,25 @@ def main() -> None:
         user_query = " ".join(args.query).strip()
         run_one_query(
             user_query,
+
             dry_run=args.dry_run,
+
+            use_supabase_cache=args.use_supabase_cache,
+            cache_any_model=args.cache_any_model,
+
             show_prompt=args.show_prompt,
+
             save_output=not args.no_save,
             excel_path=args.excel_path,
+
             run_automator=args.run_automator,
             automator_dry_run=args.automator_dry_run,
             automator_runner=args.automator_runner,
             instruments=args.instruments,
             automator_max_wait=args.automator_max_wait,
             allow_invalid=args.allow_invalid,
+
+            save_supabase=args.save_supabase,
         )
         return
 
@@ -426,6 +546,10 @@ def main() -> None:
         run_one_query(
             user_query,
             dry_run=args.dry_run,
+
+            use_supabase_cache=args.use_supabase_cache,
+            cache_any_model=args.cache_any_model,
+
             show_prompt=args.show_prompt,
             save_output=not args.no_save,
             excel_path=args.excel_path,
@@ -435,6 +559,8 @@ def main() -> None:
             instruments=args.instruments,
             automator_max_wait=args.automator_max_wait,
             allow_invalid=args.allow_invalid,
+            
+            save_supabase=args.save_supabase,
         )
 
 
