@@ -36,8 +36,8 @@ load_dotenv()
 
 EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 
-DEFAULT_TOP_K = 8
-DEFAULT_MAX_DYNAMIC_FILES = 3
+DEFAULT_TOP_K = 12
+DEFAULT_MAX_DYNAMIC_FILES = 5
 
 RETRIEVAL_BACKEND = "supabase"
 BASE_CONTEXT_SOURCE = "supabase.rag_cards"
@@ -285,12 +285,15 @@ def retrieve_tiered_dynamic_context(
     max_dynamic_files: int = DEFAULT_MAX_DYNAMIC_FILES,
 ) -> list[dict[str, Any]]:
     """
-    Optional stricter routed retrieval.
+    Routed retrieval for formula generation.
 
-    This is more controlled than one global search:
-    - functions are useful for syntax
-    - examples/patterns are useful for formula composition
-    - references/templates are mostly base context already
+    Retrieval intent:
+    - patterns teach composition and complex strategy logic
+    - functions provide exact MetaStock syntax
+    - references provide supporting syntax/rules not already in mandatory base context
+
+    This replaces the old examples bucket with the patterns bucket.
+    It also guarantees that pattern cards are not crowded out by function cards.
     """
     supabase = make_supabase_client()
     openai_client = make_openai_client()
@@ -298,18 +301,49 @@ def retrieve_tiered_dynamic_context(
     query_embedding = create_query_embedding(openai_client, query)
 
     bucket_plan = {
-        "functions": 5,
-        "examples": 5,
-        "references": 2,
+        "patterns": {
+            "top_k": 6,
+            "min_keep": 2,
+        },
+        "functions": {
+            "top_k": 6,
+            "min_keep": 3,
+        },
+        "references": {
+            "top_k": 2,
+            "min_keep": 1,
+        },
+    }
+
+    bucket_results: dict[str, list[dict[str, Any]]] = {
+        bucket: []
+        for bucket in bucket_plan
     }
 
     best_by_file: dict[str, dict[str, Any]] = {}
 
-    for bucket, top_k in bucket_plan.items():
+    def make_dynamic_item(row: dict[str, Any]) -> dict[str, Any]:
+        source_path = row.get("source_path", "")
+
+        return {
+            "file_name": get_file_name_from_source_path(source_path),
+            "file_path": source_path,
+            "card_id": row["card_id"],
+            "title": row.get("title", ""),
+            "card_type": row.get("card_type", ""),
+            "card_bucket": row.get("card_bucket", ""),
+            "category": row.get("category"),
+            "score": float(row.get("similarity") or 0),
+            "text": row.get("body_markdown", ""),
+            "retrieval_backend": RETRIEVAL_BACKEND,
+            "retrieval_source": DYNAMIC_CONTEXT_SOURCE,
+        }
+
+    for bucket, plan in bucket_plan.items():
         rows = retrieve_cards_from_supabase(
             supabase=supabase,
             query_embedding=query_embedding,
-            top_k=top_k,
+            top_k=plan["top_k"],
             filter_card_type=None,
             filter_card_bucket=bucket,
         )
@@ -321,34 +355,71 @@ def retrieve_tiered_dynamic_context(
             if should_exclude_from_dynamic(source_path=source_path, title=title):
                 continue
 
+            item = make_dynamic_item(row)
             key = normalize_filename(source_path)
-
-            item = {
-                "file_name": get_file_name_from_source_path(source_path),
-                "file_path": source_path,
-                "card_id": row["card_id"],
-                "title": title,
-                "card_type": row.get("card_type", ""),
-                "card_bucket": row.get("card_bucket", ""),
-                "category": row.get("category"),
-                "score": float(row.get("similarity") or 0),
-                "text": row.get("body_markdown", ""),
-                "retrieval_backend": RETRIEVAL_BACKEND,
-                "retrieval_source": DYNAMIC_CONTEXT_SOURCE,
-            }
 
             current = best_by_file.get(key)
 
             if current is None or item["score"] > current["score"]:
                 best_by_file[key] = item
 
-    ranked = sorted(
-        best_by_file.values(),
+    for item in best_by_file.values():
+        bucket = item.get("card_bucket", "")
+
+        if bucket in bucket_results:
+            bucket_results[bucket].append(item)
+
+    for bucket in bucket_results:
+        bucket_results[bucket].sort(
+            key=lambda x: x["score"],
+            reverse=True,
+        )
+
+    selected: list[dict[str, Any]] = []
+    selected_paths: set[str] = set()
+
+    # First pass: guarantee a minimum number from each bucket.
+    for bucket, plan in bucket_plan.items():
+        for item in bucket_results[bucket][: plan["min_keep"]]:
+            if len(selected) >= max_dynamic_files:
+                break
+
+            path = normalize_filename(item["file_path"])
+
+            if path in selected_paths:
+                continue
+
+            selected.append(item)
+            selected_paths.add(path)
+
+    # Second pass: fill remaining slots by global score.
+    remaining: list[dict[str, Any]] = []
+
+    for items in bucket_results.values():
+        for item in items:
+            path = normalize_filename(item["file_path"])
+
+            if path not in selected_paths:
+                remaining.append(item)
+
+    remaining.sort(
         key=lambda x: x["score"],
         reverse=True,
     )
 
-    return ranked[:max_dynamic_files]
+    for item in remaining:
+        if len(selected) >= max_dynamic_files:
+            break
+
+        path = normalize_filename(item["file_path"])
+
+        if path in selected_paths:
+            continue
+
+        selected.append(item)
+        selected_paths.add(path)
+
+    return selected
 
 
 def format_dynamic_context(items: Iterable[dict[str, Any]]) -> str:

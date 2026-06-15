@@ -4,28 +4,51 @@ sync_cards_to_supabase.py
 Purpose:
     Sync local MetaStock markdown knowledge cards into Supabase.
 
-What it does:
-    1. Recursively reads .md files from knowledge_base/
-    2. Parses YAML frontmatter
-    3. Parses markdown sections
-    4. Extracts useful retrieval fields:
-       - natural_language_mappings
-       - retrieval_keywords
-       - related_functions
-    5. Builds canonical embedding text
-    6. Computes content hash
-    7. Upserts into rag_cards
-    8. Optionally generates and upserts embeddings into rag_card_embeddings
+Cache behavior:
+    1. If card exists and card content_hash is unchanged, skip card upsert.
+    2. If card exists and card content_hash changed, replace the stored card.
+    3. If card does not exist, upload the card.
+    4. If embedding exists and embedding content_hash is unchanged, skip embedding.
+    5. If embedding is missing or outdated, generate and upsert latest embedding.
 
-Expected Supabase tables:
-    - rag_cards
-    - rag_card_embeddings
+Expects compact Supabase tables, with these mandatory fields:
+
+rag_cards
+row = {
+    "card_id": card.card_id,
+    "card_type": card.card_type,
+    "card_bucket": card.card_bucket,
+    "title": card.title,
+    "category": card.category,
+    "source": card.source,
+    "priority": card.priority,
+    "status": card.status,
+    "source_path": card.source_path,
+    "frontmatter": card.frontmatter,
+    "body_markdown": card.body_markdown,
+    "plain_text": card.plain_text,
+    "structured_json": build_structured_json(card),
+    "content_hash": card.content_hash,
+    "top_folder": card.source_path.split("/")[0] if "/" in card.source_path else None,
+    "file_stem": Path(card.source_path).stem if card.source_path else None,
+}
+
+rag_card_embeddings
+row = {
+    "card_id": card.card_id,
+    "embedding_model": embedding_model,
+    "embedding": embedding,
+    "embedded_text": card.canonical_text,
+    "content_hash": card.content_hash,
+}
 
 Recommended command:
-    python scripts/sync_cards_to_supabase.py
+    python scripts/sync_cards_to_supabase.py --knowledge-dir knowledge_base
 
 Optional:
     python scripts/sync_cards_to_supabase.py --knowledge-dir knowledge_base --no-embed
+    python scripts/sync_cards_to_supabase.py --knowledge-dir knowledge_base --force-embed
+    python scripts/sync_cards_to_supabase.py --knowledge-dir knowledge_base --dry-run
 """
 
 from __future__ import annotations
@@ -61,6 +84,7 @@ class ParsedCard:
     sections: dict[str, str]
 
     card_type: str
+    card_bucket: str
     category: str | None
     function_name: str | None
     template_name: str | None
@@ -112,6 +136,30 @@ def normalize_whitespace(text: str) -> str:
     return re.sub(r"\s+", " ", text or "").strip()
 
 
+def optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    cleaned = str(value).strip()
+    return cleaned if cleaned else None
+
+
+def dedupe_preserve_order(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    output: list[str] = []
+
+    for item in items:
+        cleaned = normalize_whitespace(str(item))
+        if not cleaned:
+            continue
+
+        key = cleaned.lower()
+        if key not in seen:
+            seen.add(key)
+            output.append(cleaned)
+
+    return output
+
+
 # ============================================================
 # Markdown parsing
 # ============================================================
@@ -136,7 +184,9 @@ def split_frontmatter(raw: str) -> tuple[dict[str, Any], str]:
 
     match = re.match(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", raw, flags=re.DOTALL)
     if not match:
-        raise ValueError("Markdown file appears to start with frontmatter but could not be parsed.")
+        raise ValueError(
+            "Markdown file appears to start with frontmatter but could not be parsed."
+        )
 
     frontmatter_raw = match.group(1)
     body = match.group(2)
@@ -287,6 +337,7 @@ def extract_natural_language_mappings(sections: dict[str, str]) -> list[str]:
         sections,
         [
             "Natural language mappings",
+            "Natural language triggers",
             "Natural language",
             "User request mappings",
             "Mappings",
@@ -295,8 +346,15 @@ def extract_natural_language_mappings(sections: dict[str, str]) -> list[str]:
     return extract_list_items(text)
 
 
-def extract_related_functions(sections: dict[str, str], frontmatter: dict[str, Any]) -> list[str]:
-    related_from_frontmatter = frontmatter.get("related_functions") or frontmatter.get("functions")
+def extract_related_functions(
+    sections: dict[str, str],
+    frontmatter: dict[str, Any],
+) -> list[str]:
+    related_from_frontmatter = (
+        frontmatter.get("related_functions")
+        or frontmatter.get("functions")
+        or frontmatter.get("required_functions")
+    )
 
     items: list[str] = []
 
@@ -310,6 +368,7 @@ def extract_related_functions(sections: dict[str, str], frontmatter: dict[str, A
         [
             "Related functions and concepts",
             "Related functions",
+            "Required function cards",
             "Related concepts",
         ],
     )
@@ -324,23 +383,6 @@ def extract_related_functions(sections: dict[str, str], frontmatter: dict[str, A
             cleaned.append(item.strip())
 
     return dedupe_preserve_order(cleaned)
-
-
-def dedupe_preserve_order(items: list[str]) -> list[str]:
-    seen: set[str] = set()
-    output: list[str] = []
-
-    for item in items:
-        cleaned = normalize_whitespace(str(item))
-        if not cleaned:
-            continue
-
-        key = cleaned.lower()
-        if key not in seen:
-            seen.add(key)
-            output.append(cleaned)
-
-    return output
 
 
 # ============================================================
@@ -367,6 +409,7 @@ def infer_card_id(
 
     pattern card:
         pattern.breakout
+        pattern.volume_above_average
 
     fallback:
         relative.path.without.extension
@@ -386,8 +429,9 @@ def infer_card_id(
     if card_type == "reference" and category:
         return f"reference.{slugify(str(category))}"
 
-    if card_type == "pattern" and category:
-        return f"pattern.{slugify(str(category))}"
+    if card_type == "pattern":
+        relative = file_path.relative_to(knowledge_dir).with_suffix("")
+        return f"pattern.{slugify(relative.stem)}"
 
     if card_type == "example":
         return f"example.{slugify(title)}"
@@ -396,7 +440,54 @@ def infer_card_id(
     return slugify(".".join(relative.parts))
 
 
+def infer_card_bucket(
+    file_path: Path,
+    knowledge_dir: Path,
+    frontmatter: dict[str, Any],
+) -> str:
+    """
+    Maps cards into retrieval buckets.
+
+    These bucket names should match context_builder.py bucket_plan:
+        functions
+        patterns
+        references
+        templates
+    """
+    explicit_bucket = frontmatter.get("card_bucket") or frontmatter.get("bucket")
+    if explicit_bucket:
+        return str(explicit_bucket).strip().lower()
+
+    card_type = str(frontmatter.get("type") or "").strip().lower()
+
+    if card_type == "function":
+        return "functions"
+
+    if card_type == "pattern":
+        return "patterns"
+
+    if card_type == "reference":
+        return "references"
+
+    if card_type == "template":
+        return "templates"
+
+    # Fallback to first folder name.
+    try:
+        relative = file_path.relative_to(knowledge_dir)
+        if len(relative.parts) > 1:
+            return slugify(relative.parts[0])
+    except Exception:
+        pass
+
+    return "unknown"
+
+
 def build_structured_json(card: ParsedCard) -> dict[str, Any]:
+    """
+    Not uploaded in compact schema yet.
+    Kept for future iterations or debugging.
+    """
     return {
         "title": card.title,
         "sections": card.sections,
@@ -407,6 +498,7 @@ def build_structured_json(card: ParsedCard) -> dict[str, Any]:
         },
         "metadata": {
             "card_type": card.card_type,
+            "card_bucket": card.card_bucket,
             "category": card.category,
             "function_name": card.function_name,
             "template_name": card.template_name,
@@ -425,12 +517,13 @@ def build_canonical_text(
     retrieval_keywords: list[str],
     natural_language_mappings: list[str],
     related_functions: list[str],
+    card_bucket: str,
 ) -> str:
     """
     This is the exact text that gets embedded.
 
     Design principle:
-        Include metadata + title + important mappings + body.
+        Include metadata + title + important mappings + full body.
         This makes retrieval work for both exact syntax and natural language.
     """
     lines: list[str] = []
@@ -447,6 +540,8 @@ def build_canonical_text(
 
     if card_type:
         lines.append(f"Type: {card_type}")
+    if card_bucket:
+        lines.append(f"Bucket: {card_bucket}")
     if category:
         lines.append(f"Category: {category}")
     if function_name:
@@ -477,6 +572,7 @@ def build_canonical_text(
 
     # Prefer important sections in a stable order, then include full plain text.
     important_section_names = [
+        # Existing function/template/reference sections
         "Purpose",
         "Syntax",
         "Meaning",
@@ -490,6 +586,18 @@ def build_canonical_text(
         "What not to do",
         "Assumptions",
         "Pitfalls",
+
+        # Pattern-card sections
+        "Intent",
+        "Natural Language Triggers",
+        "Keywords",
+        "Required Logical Components",
+        "Optional Confirmation Components",
+        "Formula Building Blocks",
+        "Composition Guidance",
+        "Example Compositions",
+        "Observable Outputs",
+        "Default Assumptions",
     ]
 
     for section_name in important_section_names:
@@ -517,6 +625,7 @@ def parse_card(file_path: Path, knowledge_dir: Path) -> ParsedCard:
     related_functions = extract_related_functions(sections, frontmatter)
 
     card_id = infer_card_id(file_path, knowledge_dir, frontmatter, title)
+    card_bucket = infer_card_bucket(file_path, knowledge_dir, frontmatter)
 
     canonical_text = build_canonical_text(
         title=title,
@@ -526,6 +635,7 @@ def parse_card(file_path: Path, knowledge_dir: Path) -> ParsedCard:
         retrieval_keywords=retrieval_keywords,
         natural_language_mappings=natural_language_mappings,
         related_functions=related_functions,
+        card_bucket=card_bucket,
     )
 
     content_hash = sha256_text(canonical_text)
@@ -542,6 +652,7 @@ def parse_card(file_path: Path, knowledge_dir: Path) -> ParsedCard:
         sections=sections,
 
         card_type=str(frontmatter.get("type") or "unknown").strip().lower(),
+        card_bucket=card_bucket,
         category=optional_str(frontmatter.get("category")),
         function_name=optional_str(frontmatter.get("function")),
         template_name=optional_str(frontmatter.get("template")),
@@ -556,13 +667,6 @@ def parse_card(file_path: Path, knowledge_dir: Path) -> ParsedCard:
         canonical_text=canonical_text,
         content_hash=content_hash,
     )
-
-
-def optional_str(value: Any) -> str | None:
-    if value is None:
-        return None
-    cleaned = str(value).strip()
-    return cleaned if cleaned else None
 
 
 # ============================================================
@@ -592,7 +696,10 @@ class Embedder:
         if provider == "openai":
             from openai import OpenAI
 
-            self.model_name = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+            self.model_name = os.getenv(
+                "OPENAI_EMBEDDING_MODEL",
+                "text-embedding-3-small",
+            )
             self.model = OpenAI(api_key=get_required_env("OPENAI_API_KEY"))
             return
 
@@ -622,49 +729,32 @@ class Embedder:
 
     @property
     def embedding_model_name(self) -> str:
+        # Prefer explicit EMBEDDING_MODEL only if you already use it elsewhere.
+        # Otherwise use the actual model name.
         return os.getenv("EMBEDDING_MODEL", self.model_name)
 
 
 # ============================================================
-# Supabase upsert
+# Supabase cache checks
 # ============================================================
 
-def upsert_card(supabase: Client, card: ParsedCard, dry_run: bool = False) -> None:
-    row = {
-        "card_id": card.card_id,
-        "card_type": card.card_type,
-        "category": card.category,
-        "function_name": card.function_name,
-        "template_name": card.template_name,
-        "source": card.source,
-        "priority": card.priority,
-        "status": card.status,
+def existing_card_hash(
+    supabase: Client,
+    card_id: str,
+) -> str | None:
+    response = (
+        supabase.table("rag_cards")
+        .select("content_hash")
+        .eq("card_id", card_id)
+        .limit(1)
+        .execute()
+    )
 
-        "title": card.title,
-        "source_file": card.source_file,
-        "source_path": card.source_path,
+    rows = response.data or []
+    if not rows:
+        return None
 
-        "frontmatter": card.frontmatter,
-        "body_markdown": card.body_markdown,
-        "plain_text": card.plain_text,
-        "structured_json": build_structured_json(card),
-
-        "retrieval_keywords": card.retrieval_keywords,
-        "natural_language_mappings": card.natural_language_mappings,
-        "related_functions": card.related_functions,
-
-        "content_hash": card.content_hash,
-    }
-
-    if dry_run:
-        print("[DRY RUN] Would upsert rag_cards row:")
-        print(json.dumps(row, indent=2, ensure_ascii=False)[:4000])
-        return
-
-    supabase.table("rag_cards").upsert(
-        row,
-        on_conflict="card_id",
-    ).execute()
+    return rows[0].get("content_hash")
 
 
 def existing_embedding_hash(
@@ -688,24 +778,51 @@ def existing_embedding_hash(
     return rows[0].get("content_hash")
 
 
+# ============================================================
+# Supabase upsert
+# ============================================================
+
+def upsert_card(supabase: Client, card: ParsedCard, dry_run: bool = False) -> None:
+    row = {
+        "card_id": card.card_id,
+        "card_type": card.card_type,
+        "card_bucket": card.card_bucket,
+
+        "title": card.title,
+        "category": card.category,
+        "source": card.source,
+        "priority": card.priority,
+        "status": card.status,
+
+        "source_path": card.source_path,
+        "frontmatter": card.frontmatter,
+        "body_markdown": card.body_markdown,
+        "plain_text": card.plain_text,
+        "structured_json": build_structured_json(card),
+
+        "content_hash": card.content_hash,
+
+        "top_folder": card.source_path.split("/")[0] if "/" in card.source_path else None,
+        "file_stem": Path(card.source_path).stem if card.source_path else None,
+    }
+
+    if dry_run:
+        print("[DRY RUN] Would upsert rag_cards row:")
+        print(json.dumps(row, indent=2, ensure_ascii=False)[:4000])
+        return
+
+    supabase.table("rag_cards").upsert(
+        row,
+        on_conflict="card_id",
+    ).execute()
+
 def upsert_embedding(
     supabase: Client,
     card: ParsedCard,
     embedder: Embedder,
-    force: bool = False,
     dry_run: bool = False,
 ) -> None:
     embedding_model = embedder.embedding_model_name
-
-    old_hash = None if dry_run else existing_embedding_hash(
-        supabase=supabase,
-        card_id=card.card_id,
-        embedding_model=embedding_model,
-    )
-
-    if old_hash == card.content_hash and not force:
-        print(f"  embedding unchanged; skipping: {card.card_id}")
-        return
 
     print(f"  embedding card: {card.card_id}")
     embedding = embedder.embed(card.canonical_text)
@@ -722,6 +839,7 @@ def upsert_embedding(
         print("[DRY RUN] Would upsert rag_card_embeddings row:")
         preview = dict(row)
         preview["embedding"] = f"<{len(embedding)} floats>"
+        preview["embedded_text"] = preview["embedded_text"][:1000] + "..."
         print(json.dumps(preview, indent=2, ensure_ascii=False)[:4000])
         return
 
@@ -759,8 +877,9 @@ def sync_cards(
     print(f"Found {len(md_files)} markdown card(s) under {knowledge_dir}")
 
     parsed_count = 0
-    synced_count = 0
-    embedded_count = 0
+    card_upsert_count = 0
+    embedding_upsert_count = 0
+    fully_cached_count = 0
     failed: list[tuple[str, str]] = []
 
     for file_path in md_files:
@@ -772,18 +891,63 @@ def sync_cards(
 
             print(f"  card_id: {card.card_id}")
             print(f"  type: {card.card_type}")
+            print(f"  bucket: {card.card_bucket}")
             print(f"  title: {card.title}")
             print(f"  hash: {card.content_hash[:12]}...")
 
+            card_needs_upsert = True
+            embedding_needs_upsert = embed
+
             if dry_run:
-                upsert_card(None, card, dry_run=True)  # type: ignore[arg-type]
+                print("  cache check skipped in dry-run")
             else:
                 assert supabase is not None
-                upsert_card(supabase, card, dry_run=False)
 
-            synced_count += 1
+                old_card_hash = existing_card_hash(
+                    supabase=supabase,
+                    card_id=card.card_id,
+                )
 
-            if embed:
+                if old_card_hash == card.content_hash:
+                    card_needs_upsert = False
+                    print("  card unchanged; skipping card upsert")
+                elif old_card_hash is None:
+                    print("  card not found in Supabase; will insert card")
+                else:
+                    print("  card changed; will replace stored card")
+
+                if embed:
+                    assert embedder is not None
+
+                    old_embedding_hash = existing_embedding_hash(
+                        supabase=supabase,
+                        card_id=card.card_id,
+                        embedding_model=embedder.embedding_model_name,
+                    )
+
+                    if force_embed:
+                        embedding_needs_upsert = True
+                        print("  force_embed=True; will regenerate embedding")
+                    elif old_embedding_hash == card.content_hash:
+                        embedding_needs_upsert = False
+                        print("  embedding unchanged; skipping embedding")
+                    elif old_embedding_hash is None:
+                        embedding_needs_upsert = True
+                        print("  embedding not found; will create embedding")
+                    else:
+                        embedding_needs_upsert = True
+                        print("  embedding outdated; will replace embedding")
+
+            if card_needs_upsert:
+                if dry_run:
+                    upsert_card(None, card, dry_run=True)  # type: ignore[arg-type]
+                else:
+                    assert supabase is not None
+                    upsert_card(supabase, card, dry_run=False)
+
+                card_upsert_count += 1
+
+            if embed and embedding_needs_upsert:
                 assert embedder is not None
 
                 if dry_run:
@@ -791,7 +955,6 @@ def sync_cards(
                         supabase=None,  # type: ignore[arg-type]
                         card=card,
                         embedder=embedder,
-                        force=force_embed,
                         dry_run=True,
                     )
                 else:
@@ -800,21 +963,25 @@ def sync_cards(
                         supabase=supabase,
                         card=card,
                         embedder=embedder,
-                        force=force_embed,
                         dry_run=False,
                     )
 
-                embedded_count += 1
+                embedding_upsert_count += 1
+
+            if not card_needs_upsert and not embedding_needs_upsert:
+                fully_cached_count += 1
+                print("  fully cached; no upload needed")
 
         except Exception as exc:
             failed.append((str(file_path), str(exc)))
             print(f"  ERROR: {exc}")
 
     print("\n=== Sync summary ===")
-    print(f"Parsed:   {parsed_count}")
-    print(f"Upserted: {synced_count}")
-    print(f"Embed attempts: {embedded_count}")
-    print(f"Failed:   {len(failed)}")
+    print(f"Parsed:             {parsed_count}")
+    print(f"Card upserts:       {card_upsert_count}")
+    print(f"Embedding upserts:  {embedding_upsert_count}")
+    print(f"Fully cached:       {fully_cached_count}")
+    print(f"Failed:             {len(failed)}")
 
     if failed:
         print("\nFailures:")

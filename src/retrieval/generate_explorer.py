@@ -75,12 +75,14 @@ Use the provided context only.
 Generation priorities:
 1. Generate MetaStock syntax that is likely to run in MetaStock Explorer.
 2. Use price field abbreviations from base context: C, O, H, L, V, OI.
-3. Use dynamically retrieved function cards for formula logic.
-4. Do not invent unsupported MetaStock functions.
-5. Prefer simple formulas.
-6. Use AND and OR, not && or ||.
-7. Use = for equality, not ==.
-8. If the user omits a common default, state the assumption by reflecting it in the description.
+3. Use retrieved function cards for exact MetaStock function syntax.
+4. Use retrieved pattern cards for strategy composition, logical decomposition, and multi-condition formula structure.
+5. Do not invent unsupported MetaStock functions.
+6. Prefer simple valid formulas only when no retrieved pattern card suggests a richer structure.
+7. When a pattern card is retrieved, follow its required logical components, formula building blocks, composition guidance, and pitfalls.
+8. Use AND and OR, not && or ||.
+9. Use = for equality, not ==.
+10. If the user omits a common default, state the assumption by reflecting it in the description.
 
 Output must be valid JSON matching this exact schema:
 
@@ -113,6 +115,15 @@ Database and automator contract:
 Column definition examples:
 - If col_letter is A and col_code is RSI(14), the automator can construct: col A = RSI(14)
 - If col_letter is B and col_code is Mov(C,50,S), the automator can construct: col B = Mov(C,50,S)
+
+Pattern card usage rules:
+- Pattern cards are not rigid templates.
+- Do not blindly copy every example composition from a pattern card.
+- Select only the components relevant to the user request.
+- If the user asks for a pattern such as breakout, breakdown, volume spike, pullback, bounce, trend confirmation, or momentum confirmation, prefer the retrieved pattern card's composition guidance over a shallow single-condition formula.
+- If a pattern card says a condition requires multiple components, include those components in explorer_code_body.
+- Choose col_definitions that help inspect why the symbol passed the filter.
+- Do not force every observable output from a pattern card into columns.
 
 Good output example:
 {{
@@ -328,19 +339,13 @@ def print_context_summary(
     print("  2. explorer_basic.md")
     print("  3. explorer_columns_filter.md")
 
-    print("\nDynamic retrieved files:")
+    print("\nRetrieved cards:")
     if not dynamic_items:
-        print("  No dynamic files retrieved.")
+        print("  None")
     else:
         for i, item in enumerate(dynamic_items, start=1):
-            print(
-                f"  {i}. {item['file_name']} "
-                f"| title={item.get('title', '')} "
-                f"| bucket={item.get('card_bucket', '')} "
-                f"| backend={item.get('retrieval_backend', 'unknown')} "
-                f"| source={item.get('retrieval_source', 'unknown')} "
-                f"| score={item['score']:.4f}"
-            )
+            title = item.get("title") or item.get("file_name") or "Untitled"
+            print(f"  {i}. {title}")
 
     print("\nPrompt size:")
     print(f"  {len(prompt)} characters")
@@ -379,15 +384,9 @@ def run_one_query(
     )
 
     if dry_run:
-        if show_prompt:
-            print("\n" + "=" * 100)
-            print("FULL DRY RUN PROMPT")
-            print("=" * 100)
-            print(prompt)
-        else:
-            print("\n[DRY RUN] LLM call skipped. Use --show-prompt to print the full prompt.")
+        print("\n[DRY RUN] LLM call skipped.")
         return
-
+    
         cached_row: dict[str, Any] | None = None
     cached_explorer_id: str | None = None
 
