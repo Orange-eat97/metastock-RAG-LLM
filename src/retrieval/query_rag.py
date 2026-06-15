@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dotenv import load_dotenv
 
-from src.context_builder import (
+from src.retrieval.context_builder import (
     retrieve_tiered_dynamic_context,
     retrieve_unique_dynamic_context,
 )

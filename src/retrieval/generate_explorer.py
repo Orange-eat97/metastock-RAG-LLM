@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field, field_validator
 from llama_index.core import Settings
 from llama_index.llms.openai import OpenAI
 
-from src.context_builder import build_context_for_query
+from src.retrieval.context_builder import build_context_for_query
 from src.validator import validate_explorer_output
 from src.explorer_excel_store import save_explorer_output_to_excel
 
