@@ -315,6 +315,14 @@ def print_context_summary(
     print("\n=== Context Summary ===")
     print(f"User query: {user_query}")
 
+    print("\nRetrieval backend:")
+    if dynamic_items:
+        print(f"  Dynamic: {dynamic_items[0].get('retrieval_source', 'unknown')}")
+    else:
+        print("  Dynamic: no dynamic retrieval result")
+
+    print("  Base: supabase.rag_cards")
+    
     print("\nMandatory base files:")
     print("  1. price_fields.md")
     print("  2. explorer_basic.md")
@@ -325,7 +333,14 @@ def print_context_summary(
         print("  No dynamic files retrieved.")
     else:
         for i, item in enumerate(dynamic_items, start=1):
-            print(f"  {i}. {item['file_name']} | score={item['score']:.4f}")
+            print(
+                f"  {i}. {item['file_name']} "
+                f"| title={item.get('title', '')} "
+                f"| bucket={item.get('card_bucket', '')} "
+                f"| backend={item.get('retrieval_backend', 'unknown')} "
+                f"| source={item.get('retrieval_source', 'unknown')} "
+                f"| score={item['score']:.4f}"
+            )
 
     print("\nPrompt size:")
     print(f"  {len(prompt)} characters")

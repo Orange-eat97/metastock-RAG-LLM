@@ -1,39 +1,50 @@
-import chromadb
+from __future__ import annotations
+
 from dotenv import load_dotenv
 
-from llama_index.core import VectorStoreIndex
-from llama_index.core import Settings
-from llama_index.vector_stores.chroma import ChromaVectorStore
-from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+from src.context_builder import (
+    retrieve_tiered_dynamic_context,
+    retrieve_unique_dynamic_context,
+)
 
 
 load_dotenv()
 
-CHROMA_DIR = "chroma_db"
-COLLECTION_NAME = "metastock_primer"
+
+def print_titles(items: list[dict]) -> None:
+    if not items:
+        print("No dynamic cards retrieved.")
+        return
+
+    for i, item in enumerate(items, start=1):
+        print(
+            f"{i}. {item['title']} "
+            f"({item['card_id']}, bucket={item['card_bucket']}, "
+            f"score={item['score']:.4f}, path={item['file_path']})"
+        )
 
 
-def load_index() -> VectorStoreIndex:
-    Settings.embed_model = HuggingFaceEmbedding(
-        model_name="BAAI/bge-small-en-v1.5"
-    )
+def print_full(items: list[dict]) -> None:
+    if not items:
+        print("No dynamic cards retrieved.")
+        return
 
-    chroma_client = chromadb.PersistentClient(path=CHROMA_DIR)
-    chroma_collection = chroma_client.get_or_create_collection(COLLECTION_NAME)
-
-    vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
-    index = VectorStoreIndex.from_vector_store(vector_store)
-
-    return index
+    for i, item in enumerate(items, start=1):
+        print(f"\n--- Result {i} ---")
+        print(f"Title: {item['title']}")
+        print(f"Card ID: {item['card_id']}")
+        print(f"Bucket: {item['card_bucket']}")
+        print(f"Score: {item['score']:.4f}")
+        print(f"Path: {item['file_path']}")
+        print("-" * 60)
+        print(item["text"][:1200])
 
 
 def main() -> None:
-    print("[query_rag] Loading index...")
-    index = load_index()
-
-    retriever = index.as_retriever(similarity_top_k=5)
-
-    print("[query_rag] Ready. Type 'exit' to quit.")
+    print("[query_rag] Supabase RAG mode.")
+    print("[query_rag] Type 'exit' to quit.")
+    print("[query_rag] Prefix with 'full:' to print card text.")
+    print("[query_rag] Prefix with 'global:' to use non-tiered global retrieval.")
 
     while True:
         query = input("\nUser query: ").strip()
@@ -44,20 +55,31 @@ def main() -> None:
         if not query:
             continue
 
-        nodes = retriever.retrieve(query)
+        show_full = False
+        use_global = False
 
-        print("\n=== Retrieved Context ===")
+        if query.lower().startswith("full:"):
+            show_full = True
+            query = query[5:].strip()
 
-        for i, node in enumerate(nodes, start=1):
-            file_name = node.metadata.get("file_name", "unknown")
-            file_path = node.metadata.get("file_path", "unknown")
+        if query.lower().startswith("global:"):
+            use_global = True
+            query = query[7:].strip()
 
-            print(f"\n--- Result {i} ---")
-            print(f"Score: {node.score}")
-            print(f"File: {file_name}")
-            print(f"Path: {file_path}")
-            print("-" * 60)
-            print(node.text[:1200])
+        if not query:
+            continue
+
+        if use_global:
+            items = retrieve_unique_dynamic_context(query=query)
+        else:
+            items = retrieve_tiered_dynamic_context(query=query)
+
+        print("\n=== Retrieved Cards ===")
+
+        if show_full:
+            print_full(items)
+        else:
+            print_titles(items)
 
 
 if __name__ == "__main__":

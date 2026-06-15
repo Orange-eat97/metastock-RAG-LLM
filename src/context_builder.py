@@ -1,71 +1,105 @@
+'''
+RAG retrieval service. Currently includes double tier retrieval logic from supabase, with a static card format as such:
+
+rag_cards
+  card_id
+  card_type
+  card_bucket
+  title
+  category
+  source_path
+  body_markdown
+  content_hash
+
+rag_card_embeddings
+  card_id
+  embedding
+  embedding_model
+  content_hash
+
+Will improve on the retrieval for templates/examples in future iterations. 
+
+'''
+
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Iterable
+import os
+from typing import Iterable, Any
 
-import chromadb
-from llama_index.core import Settings, VectorStoreIndex
-from llama_index.vector_stores.chroma import ChromaVectorStore
-from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+from dotenv import load_dotenv
+from openai import OpenAI
+from supabase import Client, create_client
 
 
-CHROMA_DIR = "chroma_db"
-COLLECTION_NAME = "metastock_primer"
+load_dotenv()
 
-KNOWLEDGE_DIR = Path("knowledge_base")
 
-BASE_CONTEXT_FILES = [
-    KNOWLEDGE_DIR / "references" / "price_fields.md",
-    KNOWLEDGE_DIR / "templates" / "explorer_basic.md",
-    KNOWLEDGE_DIR / "templates" / "explorer_columns_filter.md",
-]
+EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 
 DEFAULT_TOP_K = 8
 DEFAULT_MAX_DYNAMIC_FILES = 3
 
-
-def load_text_file(path: Path) -> str:
-    if not path.exists():
-        raise FileNotFoundError(f"Base context file not found: {path}")
-
-    return path.read_text(encoding="utf-8")
+RETRIEVAL_BACKEND = "supabase"
+BASE_CONTEXT_SOURCE = "supabase.rag_cards"
+DYNAMIC_CONTEXT_SOURCE = "supabase.rpc.match_rag_cards"
 
 
-def load_base_context() -> str:
-    parts = []
-
-    for path in BASE_CONTEXT_FILES:
-        text = load_text_file(path)
-        parts.append(
-            f"## BASE CONTEXT FILE: {path.as_posix()}\n\n{text}"
-        )
-
-    return "\n\n" + ("=" * 80) + "\n\n".join(parts)
+BASE_CONTEXT_SOURCE_PATHS = [
+    "references/price_fields.md",
+    "templates/explorer_basic.md",
+    "templates/explorer_columns_filter.md",
+]
 
 
-def load_index() -> VectorStoreIndex:
-    Settings.embed_model = HuggingFaceEmbedding(
-        model_name="BAAI/bge-small-en-v1.5"
+def require_env(name: str) -> str:
+    value = os.getenv(name)
+
+    if not value:
+        raise RuntimeError(f"Missing required environment variable: {name}")
+
+    return value
+
+
+def make_supabase_client() -> Client:
+    return create_client(
+        require_env("SUPABASE_URL"),
+        require_env("SUPABASE_SERVICE_ROLE_KEY"),
     )
 
-    chroma_client = chromadb.PersistentClient(path=CHROMA_DIR)
-    chroma_collection = chroma_client.get_or_create_collection(COLLECTION_NAME)
 
-    vector_store = ChromaVectorStore(chroma_collection=chroma_collection)
-    return VectorStoreIndex.from_vector_store(vector_store)
+def make_openai_client() -> OpenAI:
+    return OpenAI(api_key=require_env("OPENAI_API_KEY"))
+
+
+def create_query_embedding(openai_client: OpenAI, query: str) -> list[float]:
+    response = openai_client.embeddings.create(
+        model=EMBEDDING_MODEL,
+        input=query,
+    )
+
+    return response.data[0].embedding
 
 
 def normalize_filename(name: str) -> str:
     return name.strip().lower().replace("\\", "/")
 
 
-def should_exclude_from_dynamic(file_path: str, file_name: str) -> bool:
+def get_file_name_from_source_path(source_path: str) -> str:
+    normalized = source_path.replace("\\", "/")
+    return normalized.split("/")[-1]
+
+
+def should_exclude_from_dynamic(source_path: str, title: str = "") -> bool:
     """
     Avoid retrieving mandatory base cards again as dynamic context.
-    They are already included manually.
+
+    This preserves the previous Chroma behavior:
+    - base templates are always included manually
+    - templates are not retrieved again dynamically
+    - price_fields is not retrieved again dynamically
     """
-    path = file_path.replace("\\", "/").lower()
-    name = normalize_filename(file_name)
+    path = source_path.replace("\\", "/").lower()
+    file_name = normalize_filename(get_file_name_from_source_path(path))
 
     base_names = {
         "price_fields.md",
@@ -73,51 +107,166 @@ def should_exclude_from_dynamic(file_path: str, file_name: str) -> bool:
         "explorer_columns_filter.md",
     }
 
-    if name in base_names:
+    if file_name in base_names:
         return True
 
-    if "/templates/" in path:
+    if path.startswith("templates/"):
         return True
 
-    if "/reference/price_fields.md" in path:
+    if path == "references/price_fields.md":
         return True
 
     return False
 
 
+def fetch_cards_by_source_paths(
+    supabase: Client,
+    source_paths: list[str],
+) -> list[dict[str, Any]]:
+    response = (
+        supabase.table("rag_cards")
+        .select(
+            "card_id,title,card_type,card_bucket,category,source_path,body_markdown"
+        )
+        .in_("source_path", source_paths)
+        .execute()
+    )
+
+    rows = response.data or []
+
+    by_path = {
+        row["source_path"]: row
+        for row in rows
+    }
+
+    ordered_rows: list[dict[str, Any]] = []
+
+    missing_paths: list[str] = []
+
+    for source_path in source_paths:
+        row = by_path.get(source_path)
+
+        if row is None:
+            missing_paths.append(source_path)
+            continue
+
+        ordered_rows.append(row)
+
+    if missing_paths:
+        raise RuntimeError(
+            "Missing mandatory base context cards in Supabase: "
+            + ", ".join(missing_paths)
+        )
+
+    return ordered_rows
+
+
+def load_base_context() -> str:
+    """
+    Fetch mandatory base context from Supabase instead of local markdown files.
+    """
+    print(f"[context_builder] Loading base context from {BASE_CONTEXT_SOURCE}")
+
+    supabase = make_supabase_client()
+
+    rows = fetch_cards_by_source_paths(
+        supabase=supabase,
+        source_paths=BASE_CONTEXT_SOURCE_PATHS,
+    )
+
+    parts: list[str] = []
+
+    for row in rows:
+        parts.append(
+            f"## BASE CONTEXT FILE: {row['source_path']}\n"
+            f"Card ID: {row['card_id']}\n"
+            f"Title: {row['title']}\n"
+            f"Retrieved from: {BASE_CONTEXT_SOURCE}\n\n"
+            f"{row['body_markdown']}"
+        )
+
+    return "\n\n" + ("=" * 80) + "\n\n".join(parts)
+
+def retrieve_cards_from_supabase(
+    supabase: Client,
+    query_embedding: list[float],
+    top_k: int,
+    filter_card_type: str | None = None,
+    filter_card_bucket: str | None = None,
+) -> list[dict[str, Any]]:
+    print(
+        "[context_builder] Retrieving dynamic context from "
+        f"{DYNAMIC_CONTEXT_SOURCE} | "
+        f"top_k={top_k} | "
+        f"filter_card_type={filter_card_type} | "
+        f"filter_card_bucket={filter_card_bucket}"
+    )
+
+    response = supabase.rpc(
+        "match_rag_cards",
+        {
+            "query_embedding": query_embedding,
+            "match_count": top_k,
+            "filter_card_type": filter_card_type,
+            "filter_card_bucket": filter_card_bucket,
+        },
+    ).execute()
+
+    return response.data or []
+
 def retrieve_unique_dynamic_context(
-    index: VectorStoreIndex,
     query: str,
     top_k: int = DEFAULT_TOP_K,
     max_dynamic_files: int = DEFAULT_MAX_DYNAMIC_FILES,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """
-    Retrieve many chunks, then deduplicate by file name.
+    Retrieve many cards from Supabase, then deduplicate by source_path.
 
-    This prevents one file, e.g. rsi.md, from occupying 3 to 5 slots.
+    This preserves the old logic:
+    - retrieve more candidates than needed
+    - exclude mandatory base/template cards
+    - keep only the best result per file
+    - return max_dynamic_files
     """
-    retriever = index.as_retriever(similarity_top_k=top_k)
-    nodes = retriever.retrieve(query)
+    supabase = make_supabase_client()
+    openai_client = make_openai_client()
 
-    best_by_file: dict[str, dict] = {}
+    query_embedding = create_query_embedding(openai_client, query)
 
-    for node in nodes:
-        file_name = node.metadata.get("file_name", "unknown")
-        file_path = node.metadata.get("file_path", "")
+    rows = retrieve_cards_from_supabase(
+        supabase=supabase,
+        query_embedding=query_embedding,
+        top_k=top_k,
+        filter_card_type=None,
+        filter_card_bucket=None,
+    )
 
-        if should_exclude_from_dynamic(file_path, file_name):
+    best_by_file: dict[str, dict[str, Any]] = {}
+
+    for row in rows:
+        source_path = row.get("source_path", "")
+        title = row.get("title", "")
+
+        if should_exclude_from_dynamic(source_path=source_path, title=title):
             continue
 
-        key = normalize_filename(file_name)
-
-        current = best_by_file.get(key)
+        key = normalize_filename(source_path)
 
         item = {
-            "file_name": file_name,
-            "file_path": file_path,
-            "score": float(node.score or 0),
-            "text": node.text,
+            "file_name": get_file_name_from_source_path(source_path),
+            "file_path": source_path,
+            "card_id": row["card_id"],
+            "title": title,
+            "card_type": row.get("card_type", ""),
+            "card_bucket": row.get("card_bucket", ""),
+            "category": row.get("category"),
+            "score": float(row.get("similarity") or 0),
+            "text": row.get("body_markdown", ""),
+            "retrieval_backend": RETRIEVAL_BACKEND,
+            "retrieval_source": DYNAMIC_CONTEXT_SOURCE,
         }
+
+        current = best_by_file.get(key)
 
         if current is None or item["score"] > current["score"]:
             best_by_file[key] = item
@@ -131,13 +280,89 @@ def retrieve_unique_dynamic_context(
     return ranked[:max_dynamic_files]
 
 
-def format_dynamic_context(items: Iterable[dict]) -> str:
-    parts = []
+def retrieve_tiered_dynamic_context(
+    query: str,
+    max_dynamic_files: int = DEFAULT_MAX_DYNAMIC_FILES,
+) -> list[dict[str, Any]]:
+    """
+    Optional stricter routed retrieval.
+
+    This is more controlled than one global search:
+    - functions are useful for syntax
+    - examples/patterns are useful for formula composition
+    - references/templates are mostly base context already
+    """
+    supabase = make_supabase_client()
+    openai_client = make_openai_client()
+
+    query_embedding = create_query_embedding(openai_client, query)
+
+    bucket_plan = {
+        "functions": 5,
+        "examples": 5,
+        "references": 2,
+    }
+
+    best_by_file: dict[str, dict[str, Any]] = {}
+
+    for bucket, top_k in bucket_plan.items():
+        rows = retrieve_cards_from_supabase(
+            supabase=supabase,
+            query_embedding=query_embedding,
+            top_k=top_k,
+            filter_card_type=None,
+            filter_card_bucket=bucket,
+        )
+
+        for row in rows:
+            source_path = row.get("source_path", "")
+            title = row.get("title", "")
+
+            if should_exclude_from_dynamic(source_path=source_path, title=title):
+                continue
+
+            key = normalize_filename(source_path)
+
+            item = {
+                "file_name": get_file_name_from_source_path(source_path),
+                "file_path": source_path,
+                "card_id": row["card_id"],
+                "title": title,
+                "card_type": row.get("card_type", ""),
+                "card_bucket": row.get("card_bucket", ""),
+                "category": row.get("category"),
+                "score": float(row.get("similarity") or 0),
+                "text": row.get("body_markdown", ""),
+                "retrieval_backend": RETRIEVAL_BACKEND,
+                "retrieval_source": DYNAMIC_CONTEXT_SOURCE,
+            }
+
+            current = best_by_file.get(key)
+
+            if current is None or item["score"] > current["score"]:
+                best_by_file[key] = item
+
+    ranked = sorted(
+        best_by_file.values(),
+        key=lambda x: x["score"],
+        reverse=True,
+    )
+
+    return ranked[:max_dynamic_files]
+
+
+def format_dynamic_context(items: Iterable[dict[str, Any]]) -> str:
+    parts: list[str] = []
 
     for i, item in enumerate(items, start=1):
         parts.append(
             f"## RETRIEVED CONTEXT {i}: {item['file_name']}\n"
+            f"Card ID: {item['card_id']}\n"
+            f"Title: {item['title']}\n"
             f"Source path: {item['file_path']}\n"
+            f"Card bucket: {item['card_bucket']}\n"
+            f"Retrieval backend: {item.get('retrieval_backend', 'unknown')}\n"
+            f"Retrieval source: {item.get('retrieval_source', 'unknown')}\n"
             f"Retrieval score: {item['score']:.4f}\n\n"
             f"{item['text']}"
         )
@@ -152,22 +377,28 @@ def build_context_for_query(
     query: str,
     top_k: int = DEFAULT_TOP_K,
     max_dynamic_files: int = DEFAULT_MAX_DYNAMIC_FILES,
-) -> tuple[str, list[dict]]:
+    use_tiered_dynamic: bool = True,
+) -> tuple[str, list[dict[str, Any]]]:
     """
     Returns:
       final_context: base context + dynamic retrieved context
       dynamic_items: retrieved unique files, useful for logging/debugging
-    """
-    index = load_index()
 
+    This function keeps the old external contract used by generate_explorer.py.
+    """
     base_context = load_base_context()
 
-    dynamic_items = retrieve_unique_dynamic_context(
-        index=index,
-        query=query,
-        top_k=top_k,
-        max_dynamic_files=max_dynamic_files,
-    )
+    if use_tiered_dynamic:
+        dynamic_items = retrieve_tiered_dynamic_context(
+            query=query,
+            max_dynamic_files=max_dynamic_files,
+        )
+    else:
+        dynamic_items = retrieve_unique_dynamic_context(
+            query=query,
+            top_k=top_k,
+            max_dynamic_files=max_dynamic_files,
+        )
 
     dynamic_context = format_dynamic_context(dynamic_items)
 

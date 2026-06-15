@@ -8,3 +8,4 @@ pydantic
 numpy==1.26.4
 ollama
 openpyxl
+llama-index-embeddings-openai
