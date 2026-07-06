@@ -1,31 +1,97 @@
 ---
+canonical_id: pattern.rsi_recovery
+title: 'Pattern: RSI Recovery'
 type: pattern
 card_bucket: patterns
 category: momentum_reversal
 source: MetaStock Formula Primer / internal project pattern
-priority: 10
 status: active
+priority: 10
+supports_explorer: true
 functions:
 - RSI
 - Cross
 - Ref
 - Sum
 aliases:
-- RSI recovery
-- RSI rebound
-- oversold recovery
-- RSI crosses above 30
+- text: 'Pattern: RSI Recovery'
+  type: phrase
+  weight: 0.9
+- text: RSI Recovery
+  type: exact
+  weight: 1.0
+- text: RSI rebound
+  type: synonym
+  weight: 0.85
+- text: oversold recovery
+  type: phrase
+  weight: 0.9
+- text: RSI crosses above 30
+  type: phrase
+  weight: 0.9
+- text: RSI turns up from oversold
+  type: phrase
+  weight: 0.9
+- text: RSI rising from low levels
+  type: synonym
+  weight: 0.85
+- text: RSI improving
+  type: synonym
+  weight: 0.85
+- text: momentum recovery
+  type: phrase
+  weight: 0.9
+- text: RSI was below 30 and is now above 30
+  type: phrase
+  weight: 0.9
 requires:
-- function.rsi
+- canonical_id: function.rsi
+  rationale: This card usually needs function.rsi for correct formula generation.
+  priority: 10
+  properties:
+    source: registry_ready_transform
+    formula_role: requires
 suggests:
-- function.cross
-- function.ref
-- pattern.consecutive_condition
+- canonical_id: function.cross
+  rationale: function.cross is often useful context for this card but is not always mandatory.
+  priority: 40
+  properties:
+    source: registry_ready_transform
+    formula_role: suggests
+- canonical_id: function.ref
+  rationale: function.ref is often useful context for this card but is not always mandatory.
+  priority: 40
+  properties:
+    source: registry_ready_transform
+    formula_role: suggests
+- canonical_id: pattern.consecutive_condition
+  rationale: pattern.consecutive_condition is often useful context for this card but is not always mandatory.
+  priority: 40
+  properties:
+    source: registry_ready_transform
+    formula_role: suggests
+semantic:
+  concept_role: pattern
+  mechanism: momentum_reversal
+  market_object: price
+  directions_supported:
+  - bullish
+  - bearish
+  operations_supported:
+  - momentum_reversal
+  required_components:
+  - rsi
+  does_not_cover:
+  - unrelated_pattern_substitution
+  - guaranteed_trade_profitability
 registry:
+  enabled: true
+  canonical_id: pattern.rsi_recovery
   supports_explorer: true
   priority: 10
-  enabled: true
-  properties: {}
+  properties:
+    source_path: patterns/rsi_recovery.md
+    generated_schema_version: registry_ready_v2
 ---
 
 # Pattern: RSI Recovery
