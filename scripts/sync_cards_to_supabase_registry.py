@@ -42,6 +42,18 @@ row = {
     "content_hash": card.content_hash,
 }
 
+Registry workflow:
+    The script can also sync graph-registry metadata into:
+        rag_card_registry
+        rag_card_aliases
+        rag_card_dependencies
+
+    Registry data comes from card frontmatter and parsed card sections:
+        aliases / registry.aliases
+        requires / suggests / forbids / conflicts_with / similar_to / expands_to
+        dependencies
+        registry.properties
+
 Recommended command:
     python scripts/sync_cards_to_supabase.py --knowledge-dir knowledge_base
 
@@ -850,6 +862,571 @@ def upsert_embedding(
 
 
 # ============================================================
+# Registry / knowledge graph sync
+# ============================================================
+
+REGISTRY_CONCEPT_TYPE_BY_CARD_TYPE = {
+    "function": "function",
+    "pattern": "pattern",
+    "reference": "reference",
+    "template": "explorer_rule",
+    "example": "example",
+    "pitfall": "pitfall",
+    "field": "field",
+}
+
+REGISTRY_DEFAULT_PRIORITY_BY_CONCEPT_TYPE = {
+    "explorer_rule": 5,
+    "reference": 5,
+    "pattern": 10,
+    "function": 20,
+    "field": 20,
+    "example": 60,
+    "pitfall": 80,
+}
+
+ALLOWED_ALIAS_TYPES = {
+    "exact",
+    "synonym",
+    "phrase",
+    "abbreviation",
+    "weak_hint",
+}
+
+ALLOWED_EDGE_TYPES = {
+    "requires",
+    "suggests",
+    "conflicts_with",
+    "forbids",
+    "similar_to",
+    "expands_to",
+}
+
+
+def as_bool(value: Any, default: bool = True) -> bool:
+    if value is None:
+        return default
+
+    if isinstance(value, bool):
+        return value
+
+    text = str(value).strip().lower()
+
+    if text in {"true", "1", "yes", "y", "on"}:
+        return True
+
+    if text in {"false", "0", "no", "n", "off"}:
+        return False
+
+    return default
+
+
+def as_list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+
+    if isinstance(value, list):
+        return value
+
+    if isinstance(value, tuple):
+        return list(value)
+
+    if isinstance(value, str):
+        return extract_list_items(value)
+
+    return [value]
+
+
+def parse_int(value: Any, default: int) -> int:
+    if value is None:
+        return default
+
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def normalize_concept_type(card_type: str) -> str:
+    return REGISTRY_CONCEPT_TYPE_BY_CARD_TYPE.get(card_type, "reference")
+
+
+def registry_config(card: ParsedCard) -> dict[str, Any]:
+    raw = card.frontmatter.get("registry") or {}
+    if isinstance(raw, dict):
+        return raw
+    return {}
+
+
+def registry_enabled(card: ParsedCard) -> bool:
+    cfg = registry_config(card)
+    return as_bool(cfg.get("enabled"), default=True)
+
+
+def registry_canonical_id(card: ParsedCard) -> str:
+    cfg = registry_config(card)
+    explicit = cfg.get("canonical_id") or card.frontmatter.get("canonical_id")
+    if explicit:
+        return str(explicit).strip()
+    return card.card_id
+
+
+def registry_supports_explorer(card: ParsedCard) -> bool:
+    cfg = registry_config(card)
+    if "supports_explorer" in cfg:
+        return as_bool(cfg.get("supports_explorer"), default=True)
+    if "supports_explorer" in card.frontmatter:
+        return as_bool(card.frontmatter.get("supports_explorer"), default=True)
+    return card.card_type not in {"pitfall"}
+
+
+def registry_priority(card: ParsedCard, concept_type: str) -> int:
+    cfg = registry_config(card)
+    default = REGISTRY_DEFAULT_PRIORITY_BY_CONCEPT_TYPE.get(concept_type, 100)
+    return parse_int(
+        cfg.get("priority", card.frontmatter.get("priority", card.priority)),
+        default=default,
+    )
+
+
+def registry_graph_labels(card: ParsedCard, concept_type: str, supports_explorer: bool) -> list[str]:
+    cfg = registry_config(card)
+    explicit = cfg.get("graph_labels") or card.frontmatter.get("graph_labels")
+
+    if explicit:
+        return [str(item).strip() for item in as_list(explicit) if str(item).strip()]
+
+    labels = ["Concept"]
+
+    label_by_type = {
+        "function": "Function",
+        "pattern": "Pattern",
+        "field": "Field",
+        "explorer_rule": "ExplorerRule",
+        "reference": "Reference",
+        "example": "Example",
+        "pitfall": "Pitfall",
+    }
+
+    type_label = label_by_type.get(concept_type)
+    if type_label:
+        labels.append(type_label)
+
+    if supports_explorer:
+        labels.append("ExplorerSupported")
+
+    return labels
+
+
+def registry_properties(card: ParsedCard) -> dict[str, Any]:
+    cfg = registry_config(card)
+
+    properties: dict[str, Any] = {
+        "source_card_id": card.card_id,
+        "source_path": card.source_path,
+        "category": card.category,
+        "function_name": card.function_name,
+        "template_name": card.template_name,
+        "status": card.status,
+    }
+
+    # Keep only meaningful values.
+    properties = {
+        key: value
+        for key, value in properties.items()
+        if value is not None
+    }
+
+    frontmatter_properties = card.frontmatter.get("properties")
+    if isinstance(frontmatter_properties, dict):
+        properties.update(frontmatter_properties)
+
+    registry_properties_raw = cfg.get("properties")
+    if isinstance(registry_properties_raw, dict):
+        properties.update(registry_properties_raw)
+
+    return properties
+
+
+def infer_alias_type(alias_text: str, default: str = "phrase") -> str:
+    cleaned = alias_text.strip()
+
+    if cleaned.upper() == cleaned and len(cleaned) <= 5 and re.search(r"[A-Z]", cleaned):
+        return "abbreviation"
+
+    if len(cleaned.split()) == 1:
+        return "exact"
+
+    return default
+
+
+def normalize_alias_entry(
+    entry: Any,
+    *,
+    default_type: str,
+    default_weight: float,
+    source: str,
+) -> dict[str, Any] | None:
+    if isinstance(entry, str):
+        alias_text = normalize_whitespace(entry)
+        if not alias_text:
+            return None
+
+        return {
+            "alias_text": alias_text,
+            "alias_type": infer_alias_type(alias_text, default=default_type),
+            "weight": default_weight,
+            "source": source,
+            "properties": {},
+        }
+
+    if isinstance(entry, dict):
+        alias_text = normalize_whitespace(
+            str(entry.get("text") or entry.get("alias") or entry.get("alias_text") or "")
+        )
+        if not alias_text:
+            return None
+
+        alias_type = str(entry.get("type") or entry.get("alias_type") or infer_alias_type(alias_text, default_type)).strip()
+        if alias_type not in ALLOWED_ALIAS_TYPES:
+            alias_type = default_type
+
+        return {
+            "alias_text": alias_text,
+            "alias_type": alias_type,
+            "weight": float(entry.get("weight", default_weight)),
+            "source": str(entry.get("source") or source),
+            "properties": entry.get("properties") if isinstance(entry.get("properties"), dict) else {},
+        }
+
+    return None
+
+
+def build_registry_alias_rows(card: ParsedCard) -> list[dict[str, Any]]:
+    canonical_id = registry_canonical_id(card)
+    cfg = registry_config(card)
+
+    raw_aliases: list[tuple[Any, str, float, str]] = []
+
+    # Always include the card title as a direct alias.
+    raw_aliases.append((card.title, "exact", 1.0, "card_title"))
+
+    if card.function_name:
+        raw_aliases.append((card.function_name, "exact", 1.0, "frontmatter_function"))
+
+    if card.template_name:
+        raw_aliases.append((card.template_name, "exact", 1.0, "frontmatter_template"))
+
+    for key in ["aliases", "alias"]:
+        for item in as_list(card.frontmatter.get(key)):
+            raw_aliases.append((item, "phrase", 1.0, "frontmatter"))
+
+    for item in as_list(cfg.get("aliases")):
+        raw_aliases.append((item, "phrase", 1.0, "registry_frontmatter"))
+
+    # Section-derived natural language mappings are strong retrieval aliases.
+    for item in card.natural_language_mappings:
+        raw_aliases.append((item, "phrase", 0.9, "card_section"))
+
+    # Retrieval keywords can be broad, so keep them weaker.
+    for item in card.retrieval_keywords:
+        raw_aliases.append((item, "weak_hint", 0.6, "card_section"))
+
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+
+    for entry, default_type, default_weight, source in raw_aliases:
+        normalized = normalize_alias_entry(
+            entry,
+            default_type=default_type,
+            default_weight=default_weight,
+            source=source,
+        )
+        if normalized is None:
+            continue
+
+        key = (canonical_id, normalized["alias_text"].strip().lower())
+        if key in seen:
+            continue
+        seen.add(key)
+
+        rows.append(
+            {
+                "canonical_id": canonical_id,
+                "alias_text": normalized["alias_text"],
+                "alias_type": normalized["alias_type"],
+                "weight": normalized["weight"],
+                "language_code": "en",
+                "source": normalized["source"],
+                "properties": normalized["properties"],
+                "is_active": True,
+            }
+        )
+
+    return rows
+
+
+def normalize_dependency_entry(
+    entry: Any,
+    *,
+    from_canonical_id: str,
+    edge_type: str,
+    default_priority: int,
+    default_source: str,
+) -> dict[str, Any] | None:
+    if isinstance(entry, str):
+        to_canonical_id = entry.strip()
+        if not to_canonical_id:
+            return None
+
+        return {
+            "from_canonical_id": from_canonical_id,
+            "to_canonical_id": to_canonical_id,
+            "edge_type": edge_type,
+            "priority": default_priority,
+            "rationale": None,
+            "properties": {"source": default_source},
+            "is_active": True,
+        }
+
+    if isinstance(entry, dict):
+        to_canonical_id = str(
+            entry.get("to")
+            or entry.get("target")
+            or entry.get("canonical_id")
+            or entry.get("to_canonical_id")
+            or ""
+        ).strip()
+
+        if not to_canonical_id:
+            return None
+
+        entry_edge_type = str(entry.get("edge_type") or entry.get("type") or edge_type).strip()
+        if entry_edge_type not in ALLOWED_EDGE_TYPES:
+            entry_edge_type = edge_type
+
+        properties = entry.get("properties") if isinstance(entry.get("properties"), dict) else {}
+        properties = dict(properties)
+        properties.setdefault("source", entry.get("source") or default_source)
+
+        return {
+            "from_canonical_id": from_canonical_id,
+            "to_canonical_id": to_canonical_id,
+            "edge_type": entry_edge_type,
+            "priority": parse_int(entry.get("priority"), default=default_priority),
+            "rationale": optional_str(entry.get("rationale") or entry.get("why")),
+            "properties": properties,
+            "is_active": as_bool(entry.get("is_active"), default=True),
+        }
+
+    return None
+
+
+def build_registry_dependency_rows(card: ParsedCard) -> list[dict[str, Any]]:
+    from_canonical_id = registry_canonical_id(card)
+    cfg = registry_config(card)
+
+    rows: list[dict[str, Any]] = []
+
+    edge_defaults = {
+        "requires": 10,
+        "suggests": 40,
+        "conflicts_with": 50,
+        "forbids": 50,
+        "similar_to": 80,
+        "expands_to": 50,
+    }
+
+    # Direct edge-type lists in top-level frontmatter or registry block.
+    for edge_type, default_priority in edge_defaults.items():
+        values: list[Any] = []
+        values.extend(as_list(card.frontmatter.get(edge_type)))
+        values.extend(as_list(cfg.get(edge_type)))
+
+        for entry in values:
+            row = normalize_dependency_entry(
+                entry,
+                from_canonical_id=from_canonical_id,
+                edge_type=edge_type,
+                default_priority=default_priority,
+                default_source="frontmatter",
+            )
+            if row is not None:
+                rows.append(row)
+
+    # Generic dependency lists.
+    generic_dependencies: list[Any] = []
+    generic_dependencies.extend(as_list(card.frontmatter.get("dependencies")))
+    generic_dependencies.extend(as_list(cfg.get("dependencies")))
+
+    for entry in generic_dependencies:
+        row = normalize_dependency_entry(
+            entry,
+            from_canonical_id=from_canonical_id,
+            edge_type="requires",
+            default_priority=10,
+            default_source="dependencies",
+        )
+        if row is not None:
+            rows.append(row)
+
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    for row in rows:
+        key = (
+            row["from_canonical_id"],
+            row["to_canonical_id"],
+            row["edge_type"],
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(row)
+
+    return deduped
+
+
+def build_registry_node_row(card: ParsedCard) -> dict[str, Any]:
+    canonical_id = registry_canonical_id(card)
+    concept_type = normalize_concept_type(card.card_type)
+    supports_explorer = registry_supports_explorer(card)
+
+    return {
+        "canonical_id": canonical_id,
+        "concept_type": concept_type,
+        "graph_labels": registry_graph_labels(
+            card=card,
+            concept_type=concept_type,
+            supports_explorer=supports_explorer,
+        ),
+        "source_path": card.source_path,
+        "title": card.title,
+        "card_bucket": card.card_bucket,
+        "supports_explorer": supports_explorer,
+        "priority": registry_priority(card, concept_type),
+        "properties": registry_properties(card),
+        "is_active": card.status != "inactive",
+    }
+
+
+def upsert_registry_node(
+    supabase: Client,
+    card: ParsedCard,
+    dry_run: bool = False,
+) -> None:
+    row = build_registry_node_row(card)
+
+    if dry_run:
+        print("[DRY RUN] Would upsert rag_card_registry row:")
+        print(json.dumps(row, indent=2, ensure_ascii=False)[:4000])
+        return
+
+    supabase.table("rag_card_registry").upsert(
+        row,
+        on_conflict="canonical_id",
+    ).execute()
+
+
+def upsert_registry_aliases(
+    supabase: Client,
+    card: ParsedCard,
+    dry_run: bool = False,
+) -> int:
+    rows = build_registry_alias_rows(card)
+
+    if not rows:
+        return 0
+
+    if dry_run:
+        print("[DRY RUN] Would upsert rag_card_aliases rows:")
+        print(json.dumps(rows, indent=2, ensure_ascii=False)[:4000])
+        return len(rows)
+
+    supabase.table("rag_card_aliases").upsert(
+        rows,
+        on_conflict="canonical_id,alias_text_norm,language_code",
+    ).execute()
+
+    return len(rows)
+
+
+def upsert_registry_dependencies(
+    supabase: Client,
+    card: ParsedCard,
+    dry_run: bool = False,
+) -> int:
+    rows = build_registry_dependency_rows(card)
+
+    if not rows:
+        return 0
+
+    if dry_run:
+        print("[DRY RUN] Would upsert rag_card_dependencies rows:")
+        print(json.dumps(rows, indent=2, ensure_ascii=False)[:4000])
+        return len(rows)
+
+    supabase.table("rag_card_dependencies").upsert(
+        rows,
+        on_conflict="from_canonical_id,to_canonical_id,edge_type",
+    ).execute()
+
+    return len(rows)
+
+
+def sync_registry(
+    supabase: Client | None,
+    cards: list[ParsedCard],
+    dry_run: bool,
+) -> tuple[int, int, int, list[tuple[str, str]]]:
+    """
+    Two-pass registry sync:
+    1. Upsert all concept nodes first.
+    2. Upsert aliases and dependency edges after all nodes exist.
+
+    This avoids FK failures when a card depends on another card that appears
+    later in the local knowledge directory.
+    """
+    enabled_cards = [card for card in cards if registry_enabled(card)]
+
+    node_count = 0
+    alias_count = 0
+    dependency_count = 0
+    failed: list[tuple[str, str]] = []
+
+    print(f"\n=== Registry sync ===")
+    print(f"Registry-enabled card(s): {len(enabled_cards)}")
+
+    for card in enabled_cards:
+        try:
+            print(f"  node: {registry_canonical_id(card)}")
+            if dry_run:
+                upsert_registry_node(None, card, dry_run=True)  # type: ignore[arg-type]
+            else:
+                assert supabase is not None
+                upsert_registry_node(supabase, card, dry_run=False)
+            node_count += 1
+        except Exception as exc:
+            failed.append((card.source_path, f"registry node: {exc}"))
+            print(f"  ERROR node {card.source_path}: {exc}")
+
+    for card in enabled_cards:
+        try:
+            if dry_run:
+                alias_count += upsert_registry_aliases(None, card, dry_run=True)  # type: ignore[arg-type]
+                dependency_count += upsert_registry_dependencies(None, card, dry_run=True)  # type: ignore[arg-type]
+            else:
+                assert supabase is not None
+                alias_count += upsert_registry_aliases(supabase, card, dry_run=False)
+                dependency_count += upsert_registry_dependencies(supabase, card, dry_run=False)
+        except Exception as exc:
+            failed.append((card.source_path, f"registry edges/aliases: {exc}"))
+            print(f"  ERROR edges/aliases {card.source_path}: {exc}")
+
+    return node_count, alias_count, dependency_count, failed
+
+
+# ============================================================
 # Sync flow
 # ============================================================
 
@@ -866,122 +1443,161 @@ def sync_cards(
     embed: bool,
     force_embed: bool,
     dry_run: bool,
+    sync_registry_enabled: bool,
+    registry_only: bool,
 ) -> None:
     if not knowledge_dir.exists():
         raise RuntimeError(f"Knowledge directory does not exist: {knowledge_dir}")
 
     supabase = None if dry_run else make_supabase_client()
-    embedder = Embedder() if embed else None
+    embedder = Embedder() if (embed and not registry_only) else None
 
     md_files = iter_markdown_files(knowledge_dir)
     print(f"Found {len(md_files)} markdown card(s) under {knowledge_dir}")
 
+    parsed_cards: list[ParsedCard] = []
     parsed_count = 0
     card_upsert_count = 0
     embedding_upsert_count = 0
     fully_cached_count = 0
+    registry_node_count = 0
+    registry_alias_count = 0
+    registry_dependency_count = 0
     failed: list[tuple[str, str]] = []
 
+    # Pass 1: parse every card first. Registry dependency edges are synced later,
+    # after all registry nodes have been created.
     for file_path in md_files:
-        print(f"\nProcessing: {file_path}")
+        print(f"\nParsing: {file_path}")
 
         try:
             card = parse_card(file_path, knowledge_dir)
+            parsed_cards.append(card)
             parsed_count += 1
 
             print(f"  card_id: {card.card_id}")
             print(f"  type: {card.card_type}")
             print(f"  bucket: {card.card_bucket}")
             print(f"  title: {card.title}")
+            print(f"  source_path: {card.source_path}")
             print(f"  hash: {card.content_hash[:12]}...")
-
-            card_needs_upsert = True
-            embedding_needs_upsert = embed
-
-            if dry_run:
-                print("  cache check skipped in dry-run")
-            else:
-                assert supabase is not None
-
-                old_card_hash = existing_card_hash(
-                    supabase=supabase,
-                    card_id=card.card_id,
-                )
-
-                if old_card_hash == card.content_hash:
-                    card_needs_upsert = False
-                    print("  card unchanged; skipping card upsert")
-                elif old_card_hash is None:
-                    print("  card not found in Supabase; will insert card")
-                else:
-                    print("  card changed; will replace stored card")
-
-                if embed:
-                    assert embedder is not None
-
-                    old_embedding_hash = existing_embedding_hash(
-                        supabase=supabase,
-                        card_id=card.card_id,
-                        embedding_model=embedder.embedding_model_name,
-                    )
-
-                    if force_embed:
-                        embedding_needs_upsert = True
-                        print("  force_embed=True; will regenerate embedding")
-                    elif old_embedding_hash == card.content_hash:
-                        embedding_needs_upsert = False
-                        print("  embedding unchanged; skipping embedding")
-                    elif old_embedding_hash is None:
-                        embedding_needs_upsert = True
-                        print("  embedding not found; will create embedding")
-                    else:
-                        embedding_needs_upsert = True
-                        print("  embedding outdated; will replace embedding")
-
-            if card_needs_upsert:
-                if dry_run:
-                    upsert_card(None, card, dry_run=True)  # type: ignore[arg-type]
-                else:
-                    assert supabase is not None
-                    upsert_card(supabase, card, dry_run=False)
-
-                card_upsert_count += 1
-
-            if embed and embedding_needs_upsert:
-                assert embedder is not None
-
-                if dry_run:
-                    upsert_embedding(
-                        supabase=None,  # type: ignore[arg-type]
-                        card=card,
-                        embedder=embedder,
-                        dry_run=True,
-                    )
-                else:
-                    assert supabase is not None
-                    upsert_embedding(
-                        supabase=supabase,
-                        card=card,
-                        embedder=embedder,
-                        dry_run=False,
-                    )
-
-                embedding_upsert_count += 1
-
-            if not card_needs_upsert and not embedding_needs_upsert:
-                fully_cached_count += 1
-                print("  fully cached; no upload needed")
 
         except Exception as exc:
             failed.append((str(file_path), str(exc)))
             print(f"  ERROR: {exc}")
 
+    # Pass 2: sync document cards + embeddings.
+    if not registry_only:
+        for card in parsed_cards:
+            print(f"\nSyncing card: {card.source_path}")
+
+            try:
+                card_needs_upsert = True
+                embedding_needs_upsert = embed
+
+                if dry_run:
+                    print("  cache check skipped in dry-run")
+                else:
+                    assert supabase is not None
+
+                    old_card_hash = existing_card_hash(
+                        supabase=supabase,
+                        card_id=card.card_id,
+                    )
+
+                    if old_card_hash == card.content_hash:
+                        card_needs_upsert = False
+                        print("  card unchanged; skipping card upsert")
+                    elif old_card_hash is None:
+                        print("  card not found in Supabase; will insert card")
+                    else:
+                        print("  card changed; will replace stored card")
+
+                    if embed:
+                        assert embedder is not None
+
+                        old_embedding_hash = existing_embedding_hash(
+                            supabase=supabase,
+                            card_id=card.card_id,
+                            embedding_model=embedder.embedding_model_name,
+                        )
+
+                        if force_embed:
+                            embedding_needs_upsert = True
+                            print("  force_embed=True; will regenerate embedding")
+                        elif old_embedding_hash == card.content_hash:
+                            embedding_needs_upsert = False
+                            print("  embedding unchanged; skipping embedding")
+                        elif old_embedding_hash is None:
+                            embedding_needs_upsert = True
+                            print("  embedding not found; will create embedding")
+                        else:
+                            embedding_needs_upsert = True
+                            print("  embedding outdated; will replace embedding")
+
+                if card_needs_upsert:
+                    if dry_run:
+                        upsert_card(None, card, dry_run=True)  # type: ignore[arg-type]
+                    else:
+                        assert supabase is not None
+                        upsert_card(supabase, card, dry_run=False)
+
+                    card_upsert_count += 1
+
+                if embed and embedding_needs_upsert:
+                    assert embedder is not None
+
+                    if dry_run:
+                        upsert_embedding(
+                            supabase=None,  # type: ignore[arg-type]
+                            card=card,
+                            embedder=embedder,
+                            dry_run=True,
+                        )
+                    else:
+                        assert supabase is not None
+                        upsert_embedding(
+                            supabase=supabase,
+                            card=card,
+                            embedder=embedder,
+                            dry_run=False,
+                        )
+
+                    embedding_upsert_count += 1
+
+                if not card_needs_upsert and not embedding_needs_upsert:
+                    fully_cached_count += 1
+                    print("  fully cached; no upload needed")
+
+            except Exception as exc:
+                failed.append((card.source_path, str(exc)))
+                print(f"  ERROR: {exc}")
+    else:
+        print("\nregistry_only=True; skipping rag_cards and rag_card_embeddings sync")
+
+    # Pass 3: sync registry graph metadata.
+    if sync_registry_enabled:
+        node_count, alias_count, dependency_count, registry_failed = sync_registry(
+            supabase=supabase,
+            cards=parsed_cards,
+            dry_run=dry_run,
+        )
+        registry_node_count += node_count
+        registry_alias_count += alias_count
+        registry_dependency_count += dependency_count
+        failed.extend(registry_failed)
+    else:
+        print("\nRegistry sync disabled; skipping rag_card_registry / aliases / dependencies")
+
     print("\n=== Sync summary ===")
-    print(f"Parsed:             {parsed_count}")
-    print(f"Card upserts:       {card_upsert_count}")
-    print(f"Embedding upserts:  {embedding_upsert_count}")
-    print(f"Fully cached:       {fully_cached_count}")
-    print(f"Failed:             {len(failed)}")
+    print(f"Parsed:                 {parsed_count}")
+    print(f"Card upserts:           {card_upsert_count}")
+    print(f"Embedding upserts:      {embedding_upsert_count}")
+    print(f"Fully cached:           {fully_cached_count}")
+    print(f"Registry node upserts:  {registry_node_count}")
+    print(f"Registry alias upserts: {registry_alias_count}")
+    print(f"Registry edge upserts:  {registry_dependency_count}")
+    print(f"Failed:                 {len(failed)}")
 
     if failed:
         print("\nFailures:")
@@ -1020,6 +1636,18 @@ def parse_args() -> argparse.Namespace:
         help="Parse and print rows without writing to Supabase.",
     )
 
+    parser.add_argument(
+        "--no-registry",
+        action="store_true",
+        help="Skip rag_card_registry, rag_card_aliases, and rag_card_dependencies sync.",
+    )
+
+    parser.add_argument(
+        "--registry-only",
+        action="store_true",
+        help="Only sync registry graph metadata. Do not upsert rag_cards or embeddings.",
+    )
+
     return parser.parse_args()
 
 
@@ -1034,6 +1662,8 @@ def main() -> None:
         embed=not args.no_embed,
         force_embed=args.force_embed,
         dry_run=args.dry_run,
+        sync_registry_enabled=not args.no_registry,
+        registry_only=args.registry_only,
     )
 
 
