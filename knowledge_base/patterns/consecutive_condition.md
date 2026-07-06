@@ -1,29 +1,99 @@
 ---
+canonical_id: pattern.consecutive_condition
+title: 'Pattern: Consecutive Condition'
 type: pattern
 card_bucket: patterns
 category: condition_persistence
 source: MetaStock Formula Primer / Formula Primer II / internal project pattern
-priority: 10
 status: active
+priority: 10
+supports_explorer: true
 functions:
 - Sum
 - Ref
 - Mov
 aliases:
-- consecutive condition
-- condition held for N bars
-- stayed above
-- for five days in a row
+- text: 'Pattern: Consecutive Condition'
+  type: synonym
+  weight: 0.85
+- text: Consecutive Condition
+  type: exact
+  weight: 1.0
+- text: condition held for N bars
+  type: synonym
+  weight: 0.85
+- text: stayed above
+  type: phrase
+  weight: 0.9
+- text: for five days in a row
+  type: synonym
+  weight: 0.85
+- text: consecutive bars
+  type: synonym
+  weight: 0.85
+- text: for N days in a row
+  type: synonym
+  weight: 0.85
+- text: remained below
+  type: phrase
+  weight: 0.9
+- text: held above moving average
+  type: phrase
+  weight: 0.9
+- text: above MA for five days
+  type: phrase
+  weight: 0.9
+- text: true for all last N bars
+  type: synonym
+  weight: 0.85
+- text: at least three of the last five days
+  type: synonym
+  weight: 0.85
+- text: repeated confirmation
+  type: synonym
+  weight: 0.85
 requires:
-- function.sum
+- canonical_id: function.sum
+  rationale: This card usually needs function.sum for correct formula generation.
+  priority: 10
+  properties:
+    source: registry_ready_transform
+    formula_role: requires
 suggests:
-- function.ref
-- template.explorer_columns_filter
+- canonical_id: function.ref
+  rationale: function.ref is often useful context for this card but is not always mandatory.
+  priority: 40
+  properties:
+    source: registry_ready_transform
+    formula_role: suggests
+- canonical_id: template.explorer_columns_filter
+  rationale: template.explorer_columns_filter is often useful context for this card but is not always mandatory.
+  priority: 40
+  properties:
+    source: registry_ready_transform
+    formula_role: suggests
+semantic:
+  concept_role: pattern
+  mechanism: condition_persistence
+  market_object: price
+  directions_supported:
+  - bullish
+  - bearish
+  operations_supported:
+  - condition_persistence
+  required_components:
+  - sum
+  does_not_cover:
+  - unrelated_pattern_substitution
+  - guaranteed_trade_profitability
 registry:
+  enabled: true
+  canonical_id: pattern.consecutive_condition
   supports_explorer: true
   priority: 10
-  enabled: true
-  properties: {}
+  properties:
+    source_path: patterns/consecutive_condition.md
+    generated_schema_version: registry_ready_v2
 ---
 
 # Pattern: Consecutive Condition

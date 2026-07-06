@@ -1,28 +1,88 @@
 ---
+canonical_id: pattern.ma_crossover
+title: 'Pattern: Moving Average Crossover'
 type: pattern
 card_bucket: patterns
 category: moving_average_crossover
 source: MetaStock Formula Primer / internal project pattern
-priority: 10
 status: active
+priority: 10
+supports_explorer: true
 functions:
 - Mov
 - Cross
 aliases:
-- moving average crossover
-- MA crossover
-- golden cross
-- death cross
+- text: 'Pattern: Moving Average Crossover'
+  type: phrase
+  weight: 0.9
+- text: Moving Average Crossover
+  type: exact
+  weight: 1.0
+- text: MA crossover
+  type: phrase
+  weight: 0.9
+- text: golden cross
+  type: phrase
+  weight: 0.9
+- text: death cross
+  type: phrase
+  weight: 0.9
+- text: fast moving average crosses above slow moving average
+  type: phrase
+  weight: 0.9
+- text: 20 day moving average crosses above 50 day moving average
+  type: phrase
+  weight: 0.9
+- text: bullish moving average crossover
+  type: phrase
+  weight: 0.9
+- text: bearish moving average crossover
+  type: phrase
+  weight: 0.9
 requires:
-- function.mov
-- function.cross
+- canonical_id: function.mov
+  rationale: This card usually needs function.mov for correct formula generation.
+  priority: 10
+  properties:
+    source: registry_ready_transform
+    formula_role: requires
+- canonical_id: function.cross
+  rationale: This card usually needs function.cross for correct formula generation.
+  priority: 10
+  properties:
+    source: registry_ready_transform
+    formula_role: requires
 suggests:
-- template.explorer_columns_filter
+- canonical_id: template.explorer_columns_filter
+  rationale: template.explorer_columns_filter is often useful context for this card but is not always mandatory.
+  priority: 40
+  properties:
+    source: registry_ready_transform
+    formula_role: suggests
+semantic:
+  concept_role: pattern
+  mechanism: moving_average_crossover
+  market_object: price
+  directions_supported:
+  - bullish
+  - bearish
+  operations_supported:
+  - crossover_detection
+  - moving_average_crossover
+  required_components:
+  - mov
+  - cross
+  does_not_cover:
+  - unrelated_pattern_substitution
+  - guaranteed_trade_profitability
 registry:
+  enabled: true
+  canonical_id: pattern.ma_crossover
   supports_explorer: true
   priority: 10
-  enabled: true
-  properties: {}
+  properties:
+    source_path: patterns/ma_crossover.md
+    generated_schema_version: registry_ready_v2
 ---
 
 # Pattern: Moving Average Crossover

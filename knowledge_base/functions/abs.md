@@ -1,27 +1,80 @@
 ---
+canonical_id: function.abs
+title: Abs
 type: function
-function: Abs
+card_bucket: functions
 category: math
 source: MetaStock Formula Primer / Formula Primer II
-priority: 10
 status: active
+priority: 10
+supports_explorer: true
+function: Abs
 aliases:
-- abs
-- absolute value
-- ignore sign
-- absolute change
-requires:
-- reference.price_fields
+- text: Abs
+  type: exact
+  weight: 1.0
+- text: absolute value
+  type: synonym
+  weight: 0.85
+- text: ignore sign
+  type: synonym
+  weight: 0.85
+- text: absolute change
+  type: synonym
+  weight: 0.85
+- text: regardless of direction
+  type: synonym
+  weight: 0.85
+- text: moved more than
+  type: synonym
+  weight: 0.85
+- text: within 2 percent of
+  type: synonym
+  weight: 0.85
+- text: close to moving average
+  type: synonym
+  weight: 0.85
+- text: distance from moving average
+  type: synonym
+  weight: 0.85
+- text: magnitude of movement
+  type: synonym
+  weight: 0.85
 suggests:
-- function.roc
+- canonical_id: function.roc
+  rationale: function.roc is often useful context for this card but is not always mandatory.
+  priority: 40
+  properties:
+    source: registry_ready_transform
+    formula_role: suggests
+- canonical_id: reference.price_fields
+  rationale: reference.price_fields is optional helper context for examples involving this function.
+  priority: 40
+  properties:
+    source: converted_from_old_function_requires
+    formula_role: suggests
+semantic:
+  concept_role: function
+  mechanism: math
+  market_object: price
+  outputs:
+  - numeric_value
+  supports_conditions:
+  - threshold_comparison
+  - crossover
+  - state_filter
+  does_not_cover:
+  - complete_trading_pattern_by_itself
 registry:
+  enabled: true
+  canonical_id: function.abs
   supports_explorer: true
-  priority: 30
+  priority: 10
   properties:
     source_notes:
-    - Formula Primer: Abs(DATA ARRAY) returns the absolute value without positive
-        or negative sign.
-  enabled: true
+    - Formula Primer: Abs(DATA ARRAY) returns the absolute value without positive or negative sign.
+    source_path: functions/abs.md
+    generated_schema_version: registry_ready_v2
 ---
 
 # Abs
