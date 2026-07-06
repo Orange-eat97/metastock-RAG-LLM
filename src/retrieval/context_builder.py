@@ -433,7 +433,7 @@ def retrieve_planned_dynamic_context(
         queries = plan.retrieval_queries_by_bucket.get(bucket, [])
 
         if not queries:
-            queries = [query]
+            continue
 
         for subquery in queries:
             query_embedding = create_query_embedding(openai_client, subquery)

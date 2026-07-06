@@ -29,7 +29,8 @@ class RetrievalIntent:
     It is a planning object that says:
     - which semantic subquery should be used for vector retrieval;
     - which bucket should receive that subquery;
-    - which canonical registry concepts should be used as seed nodes.
+    - which canonical registry concepts should be used as seed nodes;
+    - which proposed seed nodes were missing from the registry.
 
     Dependencies are intentionally NOT stored here. Dependencies belong to the
     Supabase registry graph: rag_card_registry + rag_card_dependencies.
@@ -39,6 +40,7 @@ class RetrievalIntent:
     target_bucket: Bucket
     reason: str
     seed_canonical_ids: tuple[str, ...] = field(default_factory=tuple)
+    proposed_missing_seed_ids: tuple[str, ...] = field(default_factory=tuple)
     source_rule: str = ""
 
     @property
@@ -70,12 +72,20 @@ def decompose_query_for_retrieval(
     """
     LLM seed extractor.
 
-    This replaces the old string/regex seed matching.
+    This function replaces the old string/regex seed matching. It asks an LLM
+    to map the user query to seed canonical IDs, then validates every returned
+    seed against the active Supabase registry concept list supplied by the
+    retrieval planner.
 
-    Boundary:
-    - Extract seed canonical IDs only.
-    - Do not expand dependencies here.
-    - Dependency expansion belongs to Supabase registry resolver.
+    Important boundary:
+    - This function extracts seed canonical IDs only.
+    - It does NOT expand dependencies.
+    - Registry dependency expansion remains in RegistryResolver/Supabase.
+
+    If the LLM proposes a seed that is not in Supabase, this function prints a
+    message, suggests the nearest existing concept, prints:
+        suggest adding <seed> card
+    and skips the invalid seed.
     """
     concepts = _coerce_concepts(available_concepts or [])
 
@@ -98,6 +108,7 @@ def decompose_query_for_retrieval(
         raw_plan=raw_plan,
     )
 
+    # Always keep original-query fallback for vector retrieval.
     intents.append(
         RetrievalIntent(
             query=user_query,
@@ -130,6 +141,11 @@ def get_forced_card_names(intents: list[RetrievalIntent]) -> list[str]:
     Prefer get_seed_canonical_ids() in new code.
     """
     return get_seed_canonical_ids(intents)
+
+
+# ============================================================
+# LLM planner
+# ============================================================
 
 
 def _call_llm_seed_planner(
@@ -172,7 +188,6 @@ def _call_llm_seed_planner(
             temperature=0,
             response_format={"type": "json_object"},
         )
-
         content = response.choices[0].message.content or "{}"
         parsed = json.loads(content)
 
@@ -243,6 +258,11 @@ def _concepts_for_prompt(concepts: list[PlannerConcept]) -> list[dict[str, Any]]
     ]
 
 
+# ============================================================
+# Plan validation / conversion
+# ============================================================
+
+
 def _build_intents_from_llm_plan(
     user_query: str,
     concepts: list[PlannerConcept],
@@ -261,41 +281,46 @@ def _build_intents_from_llm_plan(
             continue
 
         raw_seed_ids = raw_intent.get("seed_canonical_ids") or []
-
         if isinstance(raw_seed_ids, str):
             raw_seed_ids = [raw_seed_ids]
-
         if not isinstance(raw_seed_ids, list):
             continue
 
         valid_seed_ids: list[str] = []
+        missing_seed_ids: list[str] = []
 
         for raw_seed_id in raw_seed_ids:
             seed_id = str(raw_seed_id).strip()
-
             if not seed_id:
                 continue
 
             if seed_id not in concept_lookup:
                 _print_missing_seed_message(seed_id, concepts)
+
+                if seed_id not in missing_seed_ids:
+                    missing_seed_ids.append(seed_id)
+
                 continue
 
             if seed_id not in valid_seed_ids:
                 valid_seed_ids.append(seed_id)
 
-        if not valid_seed_ids:
+        if not valid_seed_ids and not missing_seed_ids:
             continue
 
-        target_bucket = _safe_bucket(
-            raw_intent.get("target_bucket"),
-            default=concept_lookup[valid_seed_ids[0]].card_bucket,
-        )
+        if valid_seed_ids:
+            target_bucket = _safe_bucket(
+                raw_intent.get("target_bucket"),
+                default=concept_lookup[valid_seed_ids[0]].card_bucket,
+            )
+        else:
+            target_bucket = _safe_bucket(
+                raw_intent.get("target_bucket"),
+                default="references",
+            )
 
         retrieval_query = str(raw_intent.get("retrieval_query") or user_query).strip()
-        reason = str(
-            raw_intent.get("reason")
-            or "LLM selected registry seed concepts."
-        ).strip()
+        reason = str(raw_intent.get("reason") or "LLM selected registry seed concepts.").strip()
 
         intents.append(
             RetrievalIntent(
@@ -303,21 +328,37 @@ def _build_intents_from_llm_plan(
                 target_bucket=target_bucket,
                 reason=reason,
                 seed_canonical_ids=tuple(valid_seed_ids),
+                proposed_missing_seed_ids=tuple(missing_seed_ids),
                 source_rule="llm_seed_planner",
             )
         )
 
-    proposed_missing = raw_plan.get("proposed_missing_seed_ids") or []
-
+        proposed_missing = raw_plan.get("proposed_missing_seed_ids") or []
     if isinstance(proposed_missing, str):
         proposed_missing = [proposed_missing]
+
+    global_missing_seed_ids: list[str] = []
 
     if isinstance(proposed_missing, list):
         for raw_seed_id in proposed_missing:
             seed_id = str(raw_seed_id).strip()
-
             if seed_id and seed_id not in concept_lookup:
                 _print_missing_seed_message(seed_id, concepts)
+
+                if seed_id not in global_missing_seed_ids:
+                    global_missing_seed_ids.append(seed_id)
+
+    if global_missing_seed_ids:
+        intents.append(
+            RetrievalIntent(
+                query=user_query,
+                target_bucket="references",
+                reason="Missing concepts proposed by LLM seed planner.",
+                seed_canonical_ids=(),
+                proposed_missing_seed_ids=tuple(global_missing_seed_ids),
+                source_rule="llm_missing_seed_proposal",
+            )
+        )
 
     return intents
 
@@ -327,9 +368,10 @@ def _safe_bucket(value: Any, default: str) -> Bucket:
 
     if normalized in {"pattern", "patterns"}:
         return "patterns"
-
     if normalized in {"function", "functions"}:
         return "functions"
+    if normalized in {"reference", "references", "template", "templates", "examples", "example"}:
+        return "references"
 
     return "references"
 
@@ -362,13 +404,8 @@ def _find_most_similar_concept(
             concept.source_path,
             *concept.aliases,
         ]
-
         return max(
-            difflib.SequenceMatcher(
-                None,
-                seed_id.lower(),
-                str(candidate).lower(),
-            ).ratio()
+            difflib.SequenceMatcher(None, seed_id.lower(), str(candidate).lower()).ratio()
             for candidate in candidates
             if str(candidate).strip()
         )
@@ -376,12 +413,16 @@ def _find_most_similar_concept(
     return max(concepts, key=score)
 
 
+# ============================================================
+# Concept coercion
+# ============================================================
+
+
 def _coerce_concepts(values: Sequence[Any]) -> list[PlannerConcept]:
     concepts: list[PlannerConcept] = []
 
     for value in values:
         concept = _coerce_one_concept(value)
-
         if concept is not None:
             concepts.append(concept)
 
@@ -396,31 +437,22 @@ def _coerce_one_concept(value: Any) -> PlannerConcept | None:
         return getattr(value, name, default)
 
     canonical_id = str(get("canonical_id", "")).strip()
-
     if not canonical_id:
         return None
 
     aliases_raw = get("aliases", ())
-
     if aliases_raw is None:
         aliases: tuple[str, ...] = ()
     elif isinstance(aliases_raw, str):
         aliases = (aliases_raw,)
     else:
-        aliases = tuple(
-            str(alias)
-            for alias in aliases_raw
-            if str(alias).strip()
-        )
+        aliases = tuple(str(alias) for alias in aliases_raw if str(alias).strip())
 
     return PlannerConcept(
         canonical_id=canonical_id,
         title=str(get("title", get("registry_title", canonical_id)) or canonical_id),
         concept_type=str(get("concept_type", "") or ""),
-        card_bucket=str(
-            get("card_bucket", get("registry_bucket", "references"))
-            or "references"
-        ),
+        card_bucket=str(get("card_bucket", get("registry_bucket", "references")) or "references"),
         source_path=str(get("source_path", "") or ""),
         aliases=aliases,
     )

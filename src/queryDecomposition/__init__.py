@@ -9,10 +9,17 @@ from src.queryDecomposition.registry_resolver import (
     RegistryCard,
     RegistryConcept,
     RegistryResolver,
+    SemanticProfile,
 )
 from src.queryDecomposition.retrieval_planner import (
     RetrievalPlan,
     RetrievalPlanner,
+)
+from src.queryDecomposition.seed_coverage_verifier import (
+    MissingSeedSuggestion,
+    SeedCoverageDecision,
+    SeedCoverageResult,
+    SeedCoverageVerifier,
 )
 
 __all__ = [
@@ -24,6 +31,11 @@ __all__ = [
     "RegistryCard",
     "RegistryConcept",
     "RegistryResolver",
+    "SemanticProfile",
     "RetrievalPlan",
     "RetrievalPlanner",
+    "MissingSeedSuggestion",
+    "SeedCoverageDecision",
+    "SeedCoverageResult",
+    "SeedCoverageVerifier",
 ]
