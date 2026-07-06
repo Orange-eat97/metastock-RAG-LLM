@@ -1,31 +1,103 @@
 ---
+canonical_id: pattern.macd_crossover
+title: 'Pattern: MACD Crossover'
 type: pattern
 card_bucket: patterns
 category: momentum_crossover
 source: MetaStock Formula Primer / internal project pattern
-priority: 10
 status: active
+priority: 10
+supports_explorer: true
 functions:
 - MACD
 - Mov
 - Cross
 aliases:
-- MACD crossover
-- MACD bullish crossover
-- MACD crosses above signal
-- MACD signal cross
+- text: 'Pattern: MACD Crossover'
+  type: phrase
+  weight: 0.9
+- text: MACD Crossover
+  type: exact
+  weight: 1.0
+- text: MACD bullish crossover
+  type: phrase
+  weight: 0.9
+- text: MACD crosses above signal
+  type: phrase
+  weight: 0.9
+- text: MACD signal cross
+  type: phrase
+  weight: 0.9
+- text: MACD bearish crossover
+  type: phrase
+  weight: 0.9
+- text: MACD crosses below signal
+  type: phrase
+  weight: 0.9
+- text: MACD crosses above its signal line
+  type: phrase
+  weight: 0.9
+- text: MACD signal line cross
+  type: phrase
+  weight: 0.9
+- text: bullish MACD signal
+  type: synonym
+  weight: 0.85
+- text: bearish MACD signal
+  type: synonym
+  weight: 0.85
 requires:
-- function.macd
-- function.mov
-- function.cross
+- canonical_id: function.macd
+  rationale: This card usually needs function.macd for correct formula generation.
+  priority: 10
+  properties:
+    source: registry_ready_transform
+    formula_role: requires
+- canonical_id: function.mov
+  rationale: This card usually needs function.mov for correct formula generation.
+  priority: 10
+  properties:
+    source: registry_ready_transform
+    formula_role: requires
+- canonical_id: function.cross
+  rationale: This card usually needs function.cross for correct formula generation.
+  priority: 10
+  properties:
+    source: registry_ready_transform
+    formula_role: requires
 suggests:
-- template.explorer_columns_filter
+- canonical_id: template.explorer_columns_filter
+  rationale: template.explorer_columns_filter is often useful context for this card but is not always mandatory.
+  priority: 40
+  properties:
+    source: registry_ready_transform
+    formula_role: suggests
+semantic:
+  concept_role: pattern
+  mechanism: momentum_crossover
+  market_object: price
+  directions_supported:
+  - bullish
+  - bearish
+  operations_supported:
+  - crossover_detection
+  - momentum_crossover
+  required_components:
+  - macd
+  - mov
+  - cross
+  does_not_cover:
+  - unrelated_pattern_substitution
+  - guaranteed_trade_profitability
 registry:
+  enabled: true
+  canonical_id: pattern.macd_crossover
   supports_explorer: true
   priority: 10
   properties:
     default_signal_line: Mov(MACD(),9,E)
-  enabled: true
+    source_path: patterns/macd_crossover.md
+    generated_schema_version: registry_ready_v2
 ---
 
 # Pattern: MACD Crossover

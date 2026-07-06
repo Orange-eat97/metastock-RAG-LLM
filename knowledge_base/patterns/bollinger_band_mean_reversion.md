@@ -1,34 +1,107 @@
 ---
+canonical_id: pattern.bollinger_band_mean_reversion
+title: 'Pattern: Bollinger Band Mean Reversion'
 type: pattern
 card_bucket: patterns
 category: bollinger_band_mean_reversion
 source: MetaStock Formula Primer / internal project pattern
 status: active
 priority: 10
+supports_explorer: true
 aliases:
-  - Bollinger Band mean reversion
-  - lower Bollinger Band rebound
-  - bounce from lower Bollinger Band
-  - close back above lower Bollinger Band
-  - upper Bollinger Band reversal
-  - close back below upper Bollinger Band
+- text: 'Pattern: Bollinger Band Mean Reversion'
+  type: synonym
+  weight: 0.85
+- text: Bollinger Band Mean Reversion
+  type: exact
+  weight: 1.0
+- text: lower Bollinger Band rebound
+  type: synonym
+  weight: 0.85
+- text: bounce from lower Bollinger Band
+  type: synonym
+  weight: 0.85
+- text: close back above lower Bollinger Band
+  type: phrase
+  weight: 0.9
+- text: upper Bollinger Band reversal
+  type: synonym
+  weight: 0.85
+- text: close back below upper Bollinger Band
+  type: phrase
+  weight: 0.9
+- text: price re-enters Bollinger Bands
+  type: synonym
+  weight: 0.85
+- text: overextended above upper band then reverses
+  type: phrase
+  weight: 0.9
 requires:
-  - function.bbandtop
-  - function.bbandbot
+- canonical_id: function.bbandtop
+  rationale: This card usually needs function.bbandtop for correct formula generation.
+  priority: 10
+  properties:
+    source: registry_ready_transform
+    formula_role: requires
+- canonical_id: function.bbandbot
+  rationale: This card usually needs function.bbandbot for correct formula generation.
+  priority: 10
+  properties:
+    source: registry_ready_transform
+    formula_role: requires
 suggests:
-  - function.cross
-  - function.ref
-  - function.rsi
-  - reference.price_fields
+- canonical_id: function.cross
+  rationale: function.cross is often useful context for this card but is not always mandatory.
+  priority: 40
+  properties:
+    source: registry_ready_transform
+    formula_role: suggests
+- canonical_id: function.ref
+  rationale: function.ref is often useful context for this card but is not always mandatory.
+  priority: 40
+  properties:
+    source: registry_ready_transform
+    formula_role: suggests
+- canonical_id: function.rsi
+  rationale: function.rsi is often useful context for this card but is not always mandatory.
+  priority: 40
+  properties:
+    source: registry_ready_transform
+    formula_role: suggests
+- canonical_id: reference.price_fields
+  rationale: reference.price_fields is often useful context for this card but is not always mandatory.
+  priority: 40
+  properties:
+    source: registry_ready_transform
+    formula_role: suggests
+semantic:
+  concept_role: pattern
+  mechanism: bollinger_band_mean_reversion
+  market_object: price
+  directions_supported:
+  - bullish
+  - bearish
+  operations_supported:
+  - bollinger_band_mean_reversion
+  required_components:
+  - bbandtop
+  - bbandbot
+  does_not_cover:
+  - unrelated_pattern_substitution
+  - guaranteed_trade_profitability
 registry:
   enabled: true
+  canonical_id: pattern.bollinger_band_mean_reversion
   supports_explorer: true
+  priority: 10
   properties:
     formula_role: volatility_band_reversion
     default_period: 20
     default_method: S
     default_deviations: 2
     default_price_field: C
+    source_path: patterns/bollinger_band_mean_reversion.md
+    generated_schema_version: registry_ready_v2
 ---
 
 # Pattern: Bollinger Band Mean Reversion

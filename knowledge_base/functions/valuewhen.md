@@ -1,43 +1,66 @@
 ---
+canonical_id: function.valuewhen
+title: ValueWhen
 type: function
-function: ValueWhen
-category: event_reference
-source: MetaStock Formula Primer / Formula Primer II
-priority: 10
+card_bucket: functions
+category: time_reference
+source: generated_curated_from_primer
 status: active
+priority: 10
+supports_explorer: true
+function: ValueWhen
 aliases:
-- value when
-- event value
-- value at signal
-- last occurrence value
-requires:
-- reference.price_fields
-- function.ref
+- text: ValueWhen
+  type: exact
+  weight: 1.0
+- text: value when event happened
+  type: phrase
+  weight: 0.95
+- text: most recent occurrence value
+  type: phrase
+  weight: 0.9
+- text: value at last signal
+  type: phrase
+  weight: 0.9
 suggests:
-- function.barssince
-registry:
-  supports_explorer: true
-  priority: 25
+- canonical_id: function.cross
+  rationale: ValueWhen commonly retrieves the value at a Cross event.
+  priority: 30
   properties:
-    source_notes:
-    - Formula Primer: ValueWhen(Nth, EXPRESSION, DATA ARRAY) returns the data array
-        value at the Nth most recent true expression.
+    formula_role: event_expression
+- canonical_id: function.barssince
+  rationale: BarsSince and ValueWhen are often paired for event timing.
+  priority: 30
+  properties:
+    formula_role: event_timing
+semantic:
+  concept_role: function
+  mechanism: time_reference
+  market_object: price
+  outputs:
+  - indicator_series
+  supports_conditions:
+  - threshold_comparison
+  - crossover
+  - state_filter
+  does_not_cover:
+  - complete_trading_pattern_by_itself
+registry:
   enabled: true
+  canonical_id: function.valuewhen
+  supports_explorer: true
+  priority: 10
+  properties:
+    formula_role: time_reference
+    source_path: functions/valuewhen.md
+    curation_level: upgraded_to_curated_quality
 ---
 
 # ValueWhen
 
 ## Purpose
 
-`ValueWhen` returns the value of a data array when a specified expression was true.
-
-In this project, `ValueWhen` is mainly used for advanced Explorer or indicator logic such as:
-
-- value of close at the most recent signal
-- price when a crossover happened
-- last breakout level
-- value at a date or event condition
-- comparing current price against a prior event price
+`ValueWhen` returns the value of a data array at the Nth most recent time an expression was true. It is used to remember the close, high, low, indicator value, or bar number from a prior event.
 
 ## Syntax
 
@@ -49,28 +72,21 @@ ValueWhen(Nth, EXPRESSION, DATA ARRAY)
 
 | Parameter | Meaning | Common values |
 |---|---|---|
-| Nth | Which occurrence to use, counting backward from the most recent | `1`, `2` |
-| EXPRESSION | Event condition | `Cross(C,Mov(C,50,S))`, `C > Ref(HHV(C,20),-1)` |
-| DATA ARRAY | Value to return at that event | `C`, `H`, `L`, `RSI(14)` |
+| Nth | Which occurrence to retrieve, counting backward from most recent. | `1`, `2`, `3` |
+| EXPRESSION | Event condition to search for. | `Cross(C,Mov(C,50,S))` |
+| DATA ARRAY | Value to return when the expression was true. | `C`, `H`, `RSI(14)`, `Cum(1)` |
+
+## Default interpretation
+
+If the user asks for the value at the most recent signal, use `ValueWhen(1,event,value)`. Use `ValueWhen(2,event,value)` for the previous occurrence before the most recent.
 
 ## Common formulas
 
-Close at the most recent 50 MA cross:
-
 ```metastock
-ValueWhen(1, Cross(C, Mov(C,50,S)), C)
-```
-
-RSI value at the most recent 20-day close breakout:
-
-```metastock
-ValueWhen(1, C > Ref(HHV(C,20),-1), RSI(14))
-```
-
-Current close above the close at the most recent bullish cross:
-
-```metastock
-C > ValueWhen(1, Cross(C, Mov(C,50,S)), C)
+ValueWhen(1, Cross(C,Mov(C,50,S)), C)
+ValueWhen(1, RSI(14) < 30, C)
+ValueWhen(2, Cross(MACD(),Mov(MACD(),9,E)), MACD())
+C > ValueWhen(1, Cross(C,Mov(C,50,S)), C)
 ```
 
 ## Natural language mappings
@@ -78,113 +94,91 @@ C > ValueWhen(1, Cross(C, Mov(C,50,S)), C)
 Use this function when the user says:
 
 - value when
-- close when signal happened
+- value at last signal
 - price at last crossover
-- value at breakout
-- last signal price
-- most recent occurrence
-- previous occurrence of a signal
-- price when RSI crossed above 30
-- compare against signal bar
+- close when RSI was oversold
+- most recent event value
+- previous occurrence value
 
 ## Explorer column usage
 
-Event value column:
-
-```text
-Column A: C
-Column B: ValueWhen(1, Cross(C, Mov(C,50,S)), C)
-Filter: ColA > ColB
-```
+Use ValueWhen in a column when the user asks to compare current values to the value at a prior event. Ensure the event can occur within the loaded records.
 
 ## Explorer examples
 
-### Example 1: Close above most recent MA cross price
+### Example 1: Close above price at last MA cross
 
 User request:
 
 ```text
-Find stocks where close is above the price when it most recently crossed the 50 day moving average
+Find stocks where close is above the close at the last 50 MA crossover
 ```
 
 Explorer output:
 
 ```text
 Column A: C
-Column B: ValueWhen(1, Cross(C, Mov(C,50,S)), C)
+Column B: ValueWhen(1, Cross(C,Mov(C,50,S)), C)
+Filter: ColA > ColB
+```
+### Example 2: RSI above its last oversold value
+
+User request:
+
+```text
+Find stocks where RSI is above the RSI value from the last oversold day
+```
+
+Explorer output:
+
+```text
+Column A: RSI(14)
+Column B: ValueWhen(1, RSI(14) < 30, RSI(14))
 Filter: ColA > ColB
 ```
 
-## What not to do
+## Filter-only usage
 
-Do not use `ValueWhen` for simple previous-bar logic. Use `Ref` instead.
-
-Bad for yesterday close:
-
-```metastock
-ValueWhen(1, 1, C)
-```
-
-Correct:
-
-```metastock
-Ref(C,-1)
-```
-
-Do not use vague event expressions. The event must be a formula condition.
-
-Bad:
-
-```metastock
-ValueWhen(1, breakout, C)
-```
-
-Correct:
-
-```metastock
-ValueWhen(1, C > Ref(HHV(C,20),-1), C)
-```
-
-## Assumptions
-
-- `Nth = 1` means the most recent occurrence.
-- `Nth = 2` means the occurrence before the most recent occurrence.
-- Use this only when the user explicitly needs a value from an event bar.
-
-## Related functions and concepts
-
-- BarsSince: bars since an event
-- Cross: event condition
-- Ref: fixed offset reference
-- HHV: breakout event construction
-- LLV: breakdown event construction
-
-## Retrieval keywords
-
-ValueWhen, value when, event value, close at signal, price at crossover, last signal price, most recent occurrence, value at breakout, ValueWhen(1, Cross(C, Mov(C,50,S)), C).
+If the user only needs a pass/fail condition and does not need to inspect intermediate values, the function may be used directly in the Filter. For this project, prefer columns when the value helps the result table or when a pattern has multiple logical components.
 
 ## Valid Examples
 
 ```metastock
-ValueWhen(1, Cross(C, Mov(C,50,S)), C)
-ValueWhen(1, C = HHV(C,20), C)
+ValueWhen(1, Cross(C,Mov(C,50,S)), C)
+ValueWhen(2, RSI(14) < 30, C)
 ```
-
 
 ## Common Mistakes
 
-- Do not omit the occurrence number.
-- Do not use `ValueWhen` if the triggering event may never exist in loaded data.
-- Do not use it to look into the future; the expression should be based on available bars.
+- Bad: `ValueWhen(Cross(C,Mov(C,50,S)),C)`; the Nth argument is missing.
+- Bad: assuming ValueWhen has a value before the event has ever occurred.
+- Bad: using a future-looking expression inside ValueWhen for Explorer scans.
 
+## Assumptions
+
+- Nth=1 means most recent occurrence.
+- The function may be undefined until the event has occurred in loaded data.
+- Explorer accuracy depends on sufficient loaded records.
 
 ## Related Patterns
 
-- pattern.ma_support_bounce
-- pattern.consecutive_condition
+- pattern.rsi_divergence
+- pattern.pivot_high_low
+- function.barssince
 
+## Related functions and concepts
+
+- Explorer columns and filters
+- Price fields such as `C`, `H`, `L`, `O`, and `V`
+- `Cross` when the user asks for a crossing event
+- `Ref` when the user asks for previous-bar or prior-event logic
+
+
+
+## Retrieval keywords
+
+ValueWhen, event value, last signal value, Nth occurrence, value at crossover.
 
 ## Test Queries
 
-- Get the close value when price crossed above the 50 day moving average
-- Find the value when a 20 day high occurred
+- Find stocks above the close at the last moving average crossover

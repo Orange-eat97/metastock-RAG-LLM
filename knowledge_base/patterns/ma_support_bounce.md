@@ -1,30 +1,102 @@
 ---
+canonical_id: pattern.ma_support_bounce
+title: 'Pattern: Moving Average Support Bounce'
 type: pattern
 card_bucket: patterns
 category: support_bounce
 source: MetaStock Formula Primer II / internal project pattern
-priority: 10
 status: active
+priority: 10
+supports_explorer: true
 functions:
 - Mov
 - Ref
 - Sum
 aliases:
-- moving average support bounce
-- MA bounce
-- bounce from moving average
-- pullback to MA
+- text: 'Pattern: Moving Average Support Bounce'
+  type: phrase
+  weight: 0.9
+- text: Moving Average Support Bounce
+  type: exact
+  weight: 1.0
+- text: MA bounce
+  type: synonym
+  weight: 0.85
+- text: bounce from moving average
+  type: synonym
+  weight: 0.85
+- text: pullback to MA
+  type: synonym
+  weight: 0.85
+- text: MA support bounce
+  type: phrase
+  weight: 0.9
+- text: moving average support
+  type: phrase
+  weight: 0.9
+- text: pullback to 50 MA
+  type: synonym
+  weight: 0.85
+- text: price touched the moving average and closed above it
+  type: phrase
+  weight: 0.9
+- text: low touched MA and close recovered
+  type: synonym
+  weight: 0.85
+- text: bounce off support
+  type: phrase
+  weight: 0.9
+- text: close reclaims moving average
+  type: synonym
+  weight: 0.85
 requires:
-- function.mov
+- canonical_id: function.mov
+  rationale: This card usually needs function.mov for correct formula generation.
+  priority: 10
+  properties:
+    source: registry_ready_transform
+    formula_role: requires
 suggests:
-- function.ref
-- pattern.volume_above_average
-- pattern.rsi_recovery
+- canonical_id: function.ref
+  rationale: function.ref is often useful context for this card but is not always mandatory.
+  priority: 40
+  properties:
+    source: registry_ready_transform
+    formula_role: suggests
+- canonical_id: pattern.volume_above_average
+  rationale: pattern.volume_above_average is often useful context for this card but is not always mandatory.
+  priority: 40
+  properties:
+    source: registry_ready_transform
+    formula_role: suggests
+- canonical_id: pattern.rsi_recovery
+  rationale: pattern.rsi_recovery is often useful context for this card but is not always mandatory.
+  priority: 40
+  properties:
+    source: registry_ready_transform
+    formula_role: suggests
+semantic:
+  concept_role: pattern
+  mechanism: support_bounce
+  market_object: price
+  directions_supported:
+  - bullish
+  - bearish
+  operations_supported:
+  - support_bounce
+  required_components:
+  - mov
+  does_not_cover:
+  - unrelated_pattern_substitution
+  - guaranteed_trade_profitability
 registry:
+  enabled: true
+  canonical_id: pattern.ma_support_bounce
   supports_explorer: true
   priority: 10
-  enabled: true
-  properties: {}
+  properties:
+    source_path: patterns/ma_support_bounce.md
+    generated_schema_version: registry_ready_v2
 ---
 
 # Pattern: Moving Average Support Bounce
