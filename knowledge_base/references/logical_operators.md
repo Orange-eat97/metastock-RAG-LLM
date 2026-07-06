@@ -1,23 +1,107 @@
 ---
+canonical_id: reference.logical_operators
+title: Logical Operators
 type: reference
 card_bucket: references
 category: logical_operators
 source: MetaStock Formula Primer
-priority: 10
 status: active
+priority: 10
+supports_explorer: true
 aliases:
-- logical operators
-- comparison operators
-- AND OR
-- greater than less than
+- text: Logical Operators
+  type: exact
+  weight: 1.0
+- text: comparison operators
+  type: synonym
+  weight: 0.85
+- text: AND OR
+  type: abbreviation
+  weight: 1.0
+- text: greater than less than
+  type: synonym
+  weight: 0.85
+- text: greater than
+  type: synonym
+  weight: 0.85
+- text: above
+  type: weak_hint
+  weight: 0.6
+- text: over
+  type: exact
+  weight: 1.0
+- text: less than
+  type: synonym
+  weight: 0.85
+- text: below
+  type: weak_hint
+  weight: 0.6
+- text: under
+  type: exact
+  weight: 1.0
+- text: at least
+  type: synonym
+  weight: 0.85
+- text: at most
+  type: synonym
+  weight: 0.85
+- text: equal to
+  type: synonym
+  weight: 0.85
+- text: not equal to
+  type: synonym
+  weight: 0.85
+- text: and
+  type: exact
+  weight: 1.0
+- text: or
+  type: exact
+  weight: 1.0
+- text: either
+  type: exact
+  weight: 1.0
+- text: both
+  type: exact
+  weight: 1.0
+- text: all of these conditions
+  type: synonym
+  weight: 0.85
+- text: any of these conditions
+  type: synonym
+  weight: 0.85
 suggests:
-- function.if
-- template.explorer_columns_filter
+- canonical_id: function.if
+  rationale: function.if is often useful context for this card but is not always mandatory.
+  priority: 40
+  properties:
+    source: registry_ready_transform
+    formula_role: suggests
+- canonical_id: template.explorer_columns_filter
+  rationale: template.explorer_columns_filter is often useful context for this card but is not always mandatory.
+  priority: 40
+  properties:
+    source: registry_ready_transform
+    formula_role: suggests
+semantic:
+  concept_role: reference
+  mechanism: logical_operators
+  market_object: formula_language
+  operations_supported:
+  - retrieval_context
+  - formula_validation
+  - generation_constraint
+  required_components:
+  - rule_application
+  does_not_cover:
+  - standalone_trading_signal
 registry:
-  supports_explorer: true
-  priority: 5
   enabled: true
-  properties: {}
+  canonical_id: reference.logical_operators
+  supports_explorer: true
+  priority: 10
+  properties:
+    source_path: references/logical_operators.md
+    generated_schema_version: registry_ready_v2
 ---
 
 # Logical Operators
@@ -188,3 +272,7 @@ RSI(14) < 30 OR C < Ref(C,-1)
 - Do not use `||` for OR.
 - Do not use `==` for equality; MetaStock uses `=`.
 - Do not leave mixed `AND`/`OR` logic ambiguous.
+
+## Test Queries
+
+- Explain Logical Operators for MetaStock Explorer generation

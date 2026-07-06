@@ -5,8 +5,10 @@ template: explorer_basic
 source: MetaStock Formula Primer II / internal project rules
 priority: high
 status: draft
----
+registry:
+  enabled: false
 
+---
 # Explorer Basic Output Template
 
 ## Purpose

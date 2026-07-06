@@ -1,203 +1,198 @@
 ---
+canonical_id: function.if
+title: If
 type: function
-function: If
+card_bucket: functions
 category: logic
-source: MetaStock Formula Primer
-priority: 10
+source: generated_curated_from_primer
 status: active
+priority: 10
+supports_explorer: true
+function: If
 aliases:
-- conditional
-- then else
-- binary wave
-requires:
-- reference.logical_operators
+- text: If
+  type: exact
+  weight: 1.0
+- text: conditional function
+  type: synonym
+  weight: 0.9
+- text: if then else
+  type: phrase
+  weight: 0.9
+- text: binary wave
+  type: phrase
+  weight: 0.8
+- text: conditional output
+  type: phrase
+  weight: 0.85
 suggests:
-- template.explorer_columns_filter
-registry:
-  supports_explorer: true
-  priority: 20
+- canonical_id: function.sum
+  rationale: If conditions are often counted with Sum.
+  priority: 30
   properties:
-    source_notes:
-    - Formula Primer: If condition returns THEN value if true, ELSE value otherwise;
-        conditions alone imply true/false values.
+    formula_role: conditional_count
+- canonical_id: function.ref
+  rationale: If is often combined with previous values.
+  priority: 30
+  properties:
+    formula_role: previous_value_condition
+semantic:
+  concept_role: function
+  mechanism: logic
+  market_object: price
+  outputs:
+  - indicator_series
+  supports_conditions:
+  - threshold_comparison
+  - crossover
+  - state_filter
+  does_not_cover:
+  - complete_trading_pattern_by_itself
+registry:
   enabled: true
+  canonical_id: function.if
+  supports_explorer: true
+  priority: 10
+  properties:
+    formula_role: logic
+    source_path: functions/if.md
+    curation_level: upgraded_to_curated_quality
 ---
 
 # If
 
 ## Purpose
 
-`If` returns one value when a condition is true and another value when it is false.
-
-In this project, `If` is mainly used for Explorer formulas such as:
-
-- turning a condition into a numeric score
-- grading multiple conditions
-- preventing division by zero
-- choosing one calculated value from two alternatives
-
-For simple Explorer filters, the `If` function is usually unnecessary because a condition by itself already behaves like a true/false signal.
+`If` returns one value when a condition is true and another value when it is false. It is the main explicit conditional function in MetaStock. For Explorer filters, a bare condition such as `C > Mov(C,40,S)` is often enough, but `If` is useful when a formula must output a numeric state, score, flag, or switch.
 
 ## Syntax
 
 ```metastock
-If(CONDITION, THEN DATA ARRAY, ELSE DATA ARRAY)
+If(CONDITION, TRUE RESULT, FALSE RESULT)
 ```
 
 ## Parameters
 
-| Parameter | Meaning | Example |
+| Parameter | Meaning | Common values |
 |---|---|---|
-| CONDITION | Logical comparison | `C > Mov(C,40,S)` |
-| THEN DATA ARRAY | Value returned when condition is true | `1` |
-| ELSE DATA ARRAY | Value returned when condition is false | `0` |
+| CONDITION | A comparison or logical expression. | `C > Mov(C,40,S)` |
+| TRUE RESULT | Value returned if condition is true. | `1`, `C`, `RSI(14)` |
+| FALSE RESULT | Value returned if condition is false. | `0`, `PREV`, `-1` |
+
+## Default interpretation
+
+For simple Explorer filters, prefer the condition itself. Use `If` when the user asks for a grade, score, binary flag, or a formula that must output different values under different cases.
 
 ## Common formulas
 
-Close above 40-period moving average as a 1 or 0:
-
 ```metastock
 If(C > Mov(C,40,S),1,0)
-```
-
-Avoid divide by zero:
-
-```metastock
-If(Mov(V,20,S) = 0, 0, V / Mov(V,20,S))
-```
-
-Simple grade for two conditions:
-
-```metastock
-If(C > Mov(C,50,S),1,0) + If(RSI(14) > 50,1,0)
+If(RSI(14) < 30,1,0)
+If(C > Mov(C,50,S), RSI(14), 0)
+If(MACD() > Mov(MACD(),9,E),1,If(MACD() < Mov(MACD(),9,E),-1,0))
 ```
 
 ## Natural language mappings
 
 Use this function when the user says:
 
+- if
 - if then else
-- return 1 if true
-- otherwise return 0
-- binary signal
-- score this condition
-- grade the result
-- assign one point if condition is true
-- avoid divide by zero
-- use fallback value
+- conditional formula
+- binary wave
+- flag condition
+- score when true
+- return 1 otherwise 0
+- state switch
 
 ## Explorer column usage
 
-For a grading column:
-
-```text
-Column A: If(C > Mov(C,50,S),1,0) + If(RSI(14) > 50,1,0)
-Filter: ColA >= 2
-```
-
-For a simple filter, prefer the condition directly:
-
-```text
-Column A: C
-Column B: Mov(C,50,S)
-Filter: ColA > ColB
-```
+Use `If` columns when the result table should show a numeric flag or score. The filter can often use the plain condition instead of `If(condition,1,0)=1`.
 
 ## Explorer examples
 
-### Example 1: Score trend and momentum
+### Example 1: Binary flag for close above MA
 
 User request:
 
 ```text
-Find stocks that pass both trend and momentum, and show a score
+Show a flag when close is above 40 day moving average
 ```
 
 Explorer output:
 
 ```text
-Column A: If(C > Mov(C,50,S),1,0) + If(RSI(14) > 50,1,0)
-Filter: ColA = 2
+Column A: C
+Column B: Mov(C,40,S)
+Column C: If(ColA > ColB,1,0)
+Filter: ColC = 1
 ```
+Notes:
 
-### Example 2: Volume ratio with zero guard
+```text
+For maximum historical safety, use `If(C > Mov(C,40,S),1,0)` directly in Column C rather than relying on ColA/ColB inside a historical function.
+```
+### Example 2: Filter without If
 
 User request:
 
 ```text
-Show volume ratio but avoid divide by zero
+Find stocks where close is above 40 day moving average
 ```
 
 Explorer output:
 
 ```text
-Column A: If(Mov(V,20,S) = 0, 0, V / Mov(V,20,S))
-Filter: ColA > 1
+Column A: C
+Column B: Mov(C,40,S)
+Filter: ColA > ColB
 ```
 
-## What not to do
+## Filter-only usage
 
-Do not wrap every Explorer filter in `If` when the condition is already enough.
-
-Unnecessary:
-
-```metastock
-If(C > Mov(C,50,S),1,0) = 1
-```
-
-Preferred:
-
-```metastock
-C > Mov(C,50,S)
-```
-
-Do not use programming syntax such as `if ... then ... else` inside the formula.
-
-Correct:
-
-```metastock
-If(C > Mov(C,50,S),1,0)
-```
-
-## Assumptions
-
-- A standalone condition can be used as a filter condition.
-- `If` is useful when a numeric output is needed, not merely for true/false filtering.
-- Use nested `If` sparingly because nested logic can become hard to validate.
-
-## Related functions and concepts
-
-- Logical Operators: `>`, `<`, `=`, `<>`, `AND`, `OR`
-- Sum: count true/false conditions over periods
-- Max: clamp minimum values
-- Min: clamp maximum values
-
-## Retrieval keywords
-
-If, conditional, then else, binary wave, score condition, grade condition, return 1 if true, return 0 if false, avoid divide by zero, If(C > Mov(C,40,S),1,0).
+If the user only needs a pass/fail condition and does not need to inspect intermediate values, the function may be used directly in the Filter. For this project, prefer columns when the value helps the result table or when a pattern has multiple logical components.
 
 ## Valid Examples
 
 ```metastock
-If(C > Mov(C,40,S), 1, 0)
-If(RSI(14) < 30, RSI(14), 0)
+If(C > Mov(C,40,S),1,0)
+If(RSI(14) > 70, -1, 0)
+C > Mov(C,40,S)
 ```
-
 
 ## Common Mistakes
 
-- Do not omit the false-result argument.
-- Do not use programming syntax such as `if condition then`.
-- In Explorer filters, a raw condition like `C > Mov(C,40,S)` is usually enough; use `If` when an explicit output value is needed.
+- Bad: `If(C > Mov(C,40,S),1)`. Correct: `If(C > Mov(C,40,S),1,0)`.
+- Bad: using natural-language THEN/ELSE text inside a numeric formula.
+- Bad: using `If` unnecessarily for simple Explorer filters when the condition itself is clearer.
+- Bad: omitting parentheses around complex `AND`/`OR` conditions.
 
+## Assumptions
+
+- MetaStock treats a true condition as non-zero and false as zero.
+- Explorer filters can use direct logical conditions without wrapping them in `If`.
+- Nested `If` expressions are valid but should be kept readable.
 
 ## Related Patterns
 
-- pattern.consecutive_condition
-- pattern.rsi_recovery
+- pattern.logical_switch_state_machine
+- function.sum
+- function.barssince
 
+## Related functions and concepts
+
+- Explorer columns and filters
+- Price fields such as `C`, `H`, `L`, `O`, and `V`
+- `Cross` when the user asks for a crossing event
+- `Ref` when the user asks for previous-bar or prior-event logic
+
+
+
+## Retrieval keywords
+
+If, conditional, binary wave, if then else, logic, state flag.
 
 ## Test Queries
 
-- Create a binary wave for close above moving average
-- Use If to return 1 when RSI is below 30
+- Find stocks where close is above the 40 day moving average
+- Create a flag for RSI below 30

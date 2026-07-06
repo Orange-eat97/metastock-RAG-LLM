@@ -1,29 +1,81 @@
 ---
+canonical_id: function.wilders
+title: Wilders
 type: function
-function: Wilders
+card_bucket: functions
 category: smoothing
 source: MetaStock Formula Primer / Formula Primer II
-priority: 10
 status: active
+priority: 10
+supports_explorer: true
+function: Wilders
 aliases:
-- Wilder smoothing
-- Wilder's smoothing
-- Wilders
-- Wilder average
-requires:
-- reference.price_fields
+- text: Wilders
+  type: exact
+  weight: 1.0
+- text: Wilder smoothing
+  type: synonym
+  weight: 0.85
+- text: Wilder's smoothing
+  type: synonym
+  weight: 0.85
+- text: Wilder average
+  type: synonym
+  weight: 0.85
+- text: Wilder style average
+  type: synonym
+  weight: 0.85
+- text: custom RSI calculation
+  type: synonym
+  weight: 0.85
+- text: custom ATR calculation
+  type: synonym
+  weight: 0.85
+- text: smooth using Wilder method
+  type: synonym
+  weight: 0.85
 suggests:
-- function.atr
-- function.rsi
+- canonical_id: function.atr
+  rationale: function.atr is often useful context for this card but is not always mandatory.
+  priority: 40
+  properties:
+    source: registry_ready_transform
+    formula_role: suggests
+- canonical_id: function.rsi
+  rationale: function.rsi is often useful context for this card but is not always mandatory.
+  priority: 40
+  properties:
+    source: registry_ready_transform
+    formula_role: suggests
+- canonical_id: reference.price_fields
+  rationale: reference.price_fields is optional helper context for examples involving this function.
+  priority: 40
+  properties:
+    source: converted_from_old_function_requires
+    formula_role: suggests
+semantic:
+  concept_role: function
+  mechanism: smoothing
+  market_object: price
+  outputs:
+  - indicator_series
+  supports_conditions:
+  - threshold_comparison
+  - crossover
+  - state_filter
+  does_not_cover:
+  - complete_trading_pattern_by_itself
 registry:
+  enabled: true
+  canonical_id: function.wilders
   supports_explorer: true
-  priority: 35
+  priority: 10
   properties:
     source_notes:
     - Formula Primer: Wilders(DATA ARRAY, PERIODS) calculates Wilder's Smoothing.
-    - Formula Primer II: Wilder smoothing starts with a simple average and then uses
-        prior average plus current contribution.
-  enabled: true
+    - Formula Primer II: Wilder smoothing starts with a simple average and then uses prior average plus current contribution.
+    source_path: functions/wilders.md
+    generated_schema_version: registry_ready_v2
 ---
 
 # Wilders

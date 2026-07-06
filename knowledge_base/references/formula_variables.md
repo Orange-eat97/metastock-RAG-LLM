@@ -1,22 +1,77 @@
 ---
+canonical_id: reference.formula_variables
+title: Formula Variables
 type: reference
 card_bucket: references
 category: formula_variables
 source: MetaStock Formula Primer / Formula Primer II
-priority: 10
 status: active
+priority: 10
+supports_explorer: true
 aliases:
-- formula variables
-- variable definitions
-- temporary variable
-- assignment operator
+- text: Formula Variables
+  type: exact
+  weight: 1.0
+- text: variable definitions
+  type: synonym
+  weight: 0.85
+- text: temporary variable
+  type: synonym
+  weight: 0.85
+- text: assignment operator
+  type: synonym
+  weight: 0.85
+- text: variable
+  type: exact
+  weight: 1.0
+- text: define MA first
+  type: synonym
+  weight: 0.85
+- text: reusable calculation
+  type: synonym
+  weight: 0.85
+- text: simplify formula
+  type: synonym
+  weight: 0.85
+- text: repeated expression
+  type: synonym
+  weight: 0.85
+- text: formula too long
+  type: synonym
+  weight: 0.85
+- text: assign value
+  type: synonym
+  weight: 0.85
+- text: use intermediate value
+  type: synonym
+  weight: 0.85
 suggests:
-- reference.explorer_environment_limitations
+- canonical_id: reference.explorer_environment_limitations
+  rationale: reference.explorer_environment_limitations is often useful context for this card but is not always mandatory.
+  priority: 40
+  properties:
+    source: registry_ready_transform
+    formula_role: suggests
+semantic:
+  concept_role: reference
+  mechanism: formula_variables
+  market_object: formula_language
+  operations_supported:
+  - retrieval_context
+  - formula_validation
+  - generation_constraint
+  required_components:
+  - rule_application
+  does_not_cover:
+  - standalone_trading_signal
 registry:
-  supports_explorer: true
-  priority: 15
   enabled: true
-  properties: {}
+  canonical_id: reference.formula_variables
+  supports_explorer: true
+  priority: 10
+  properties:
+    source_path: references/formula_variables.md
+    generated_schema_version: registry_ready_v2
 ---
 
 # Formula Variables
@@ -169,3 +224,7 @@ Upper - Lower
 - Do not forget semicolons after intermediate variable definitions.
 - Do not end the final expression with a semicolon if MetaStock expects a final output expression.
 - Do not create variable names that start with numbers.
+
+## Test Queries
+
+- Explain Formula Variables for MetaStock Explorer generation

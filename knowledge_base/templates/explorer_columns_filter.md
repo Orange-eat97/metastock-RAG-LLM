@@ -5,8 +5,10 @@ template: explorer_columns_filter
 source: MetaStock Formula Primer II / internal project rules
 priority: high
 status: draft
----
+registry:
+  enabled: false
 
+---
 # Explorer Columns and Filter Rules
 
 ## Purpose

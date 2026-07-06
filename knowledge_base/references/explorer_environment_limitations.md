@@ -1,187 +1,109 @@
 ---
+canonical_id: reference.explorer_environment_limitations
+title: Explorer Environment Limitations
 type: reference
 card_bucket: references
-category: explorer_environment_limitations
-source: MetaStock Formula Primer II / internal project rules
-priority: 10
+category: explorer_environment
+source: generated_curated_from_primer
 status: active
+priority: 10
+supports_explorer: true
 aliases:
-- Explorer limitations
-- ColA historical limitation
-- no OPT in Explorer
-- no simulation functions in Explorer
-forbids:
-- function.input
+- text: Explorer limitations
+  type: exact
+  weight: 1.0
+- text: MetaStock Explorer columns limitation
+  type: phrase
+  weight: 0.95
+- text: ColA historical values
+  type: phrase
+  weight: 0.9
+- text: Explorer cannot use future values
+  type: phrase
+  weight: 0.9
 suggests:
-- template.explorer_columns_filter
+- canonical_id: reference.lookahead_future_reference_pitfalls
+  rationale: Explorer formulas must avoid future-looking references.
+  priority: 30
+  properties:
+    formula_role: lookahead_validation
+semantic:
+  concept_role: reference
+  mechanism: explorer_environment
+  market_object: formula_environment
+  outputs:
+  - generation_rule
+  - validation_rule
+  supports_conditions:
+  - environment_validation
+  - syntax_validation
+  does_not_cover:
+  - specific_trading_signal_by_itself
 registry:
-  supports_explorer: true
-  priority: 5
   enabled: true
-  properties: {}
+  canonical_id: reference.explorer_environment_limitations
+  supports_explorer: true
+  priority: 10
+  properties:
+    formula_role: explorer_environment
+    source_path: references/explorer_environment_limitations.md
+    curation_level: upgraded_to_curated_quality
 ---
 
 # Explorer Environment Limitations
 
 ## Purpose
 
-This card defines constraints that matter when generating formulas for MetaStock Explorer rather than Indicator Builder or System Tester.
-
-Use this card to prevent formulas that are valid in another MetaStock tool but invalid or misleading in Explorer.
-
-## Important Explorer limitation
-
-Explorer formulas are evaluated as of the exploration date. They should not reference values after that date.
-
-Explorer columns can be referenced in the filter with `ColA`, `ColB`, etc., but those references are last-value references, not full historical data arrays.
-
-Bad:
-
-```metastock
-Ref(ColA,-1)
-```
-
-Correct:
-
-```text
-Column A: C
-Column B: Ref(C,-1)
-Filter: ColA > ColB
-```
-
-## Tool-specific rules
-
-### Indicator Builder
-
-- `Input()` prompts are only for custom indicators.
-- A custom indicator can have a limited number of input prompts.
-- Other formulas can reference indicators with `Fml()` or `FmlVar()`.
-
-### Explorer
-
-- Use columns for inspectable output values.
-- Use the filter to include or reject securities.
-- Avoid historical references to `ColA`, `ColB`, etc.
-- Prefer direct formulas or columns over interactive prompts.
-
-### System Tester
-
-- `OPT` variables are only defined in System Tester.
-- Simulation functions are System Tester-specific.
-- Simulation functions should not be used in Explorer generation.
-
-## Natural language mappings
-
-Use this card when the user says:
-
-- Explorer limitation
-- why ColA failed
-- Ref ColA
-- historical column reference
-- OPT variable
-- optimization variable
-- simulation function
-- system tester only
-- input prompt
-- formula works in indicator but not Explorer
-
-## Validation checklist
-
-Reject or repair generated Explorer output if:
-
-- the filter contains `Ref(ColA,-1)` or similar historical `ColX` references
-- the formula uses `OPT1`, `OPT2`, or other optimization variables
-- the formula uses `Simulation.` functions
-- the formula uses `Input()` in an Explorer formula
-- the formula references a column that is not defined
-- the formula uses future references such as `Ref(C,1)` for normal scans
-
-## Explorer examples
-
-### Correct previous-close comparison
-
-```text
-Column A: C
-Column B: Ref(C,-1)
-Filter: ColA > ColB
-```
-
-### Correct rising moving average comparison
-
-```text
-Column A: Mov(C,20,S)
-Column B: Ref(Mov(C,20,S),-1)
-Filter: ColA > ColB
-```
-
-## What not to do
-
-Bad:
-
-```text
-Column A: C
-Filter: ColA > Ref(ColA,-1)
-```
-
-Bad:
-
-```metastock
-OPT1 > 10
-```
-
-Bad:
-
-```metastock
-Simulation.LongPositionCount = 1
-```
-
-Bad:
-
-```metastock
-Input("periods",1,200,14)
-```
-
-## Assumptions
-
-- The current project output target is Explorer unless the user explicitly asks for Indicator Builder, System Tester, or Expert Advisor.
-- For Explorer scans, avoid future references and tool-specific functions from other MetaStock environments.
-
-## Related functions and concepts
-
-- Explorer Columns and Filter Rules
-- Ref: historical data references
-- Formula Variables
-- Input Prompt Limitations
-
-## Retrieval keywords
-
-Explorer limitations, ColA historical limitation, Ref(ColA,-1), OPT only System Tester, Simulation functions, Input not Explorer, MetaStock environment, Explorer columns last value, no future data, validation checklist.
+This card defines environment rules for generating MetaStock Explorer formulas. It prevents invalid column references, future-looking formulas, and System Tester-only constructs from entering Explorer output.
 
 ## Rules
 
-- Explorer filters should evaluate conditions at the exploration date.
-- Do not use positive `Ref()` offsets for normal historical scans because they imply future references.
-- Do not use System Tester-only `Simulation.*` functions in Explorer formulas.
-- Do not use `OPT` variables in Explorer formulas.
-- Do not apply historical functions such as `Ref()` to `ColA` or `ColB`; put the historical reference inside the column formula instead.
-
+- Explorer columns such as `ColA`, `ColB`, and `ColC` are last-value references for the exploration date.
+- Do not treat `ColA` as a historical data array; avoid `Ref(ColA,-1)`, `Mov(ColA,20,S)`, and `Sum(ColA,5)`.
+- Put historical logic inside the column formula itself, such as `Ref(C,-1)` or `Mov(C,20,S)`.
+- Explorer formulas should not reference values after the exploration date.
+- Define columns before referencing them in the filter.
+- Use `AND` and `OR`, not programming operators such as `&&` or `||`.
+- Use `=` for equality, not `==`.
 
 ## Examples
 
-```text
+```metastock
 Column A: C
 Column B: Ref(C,-1)
 Filter: ColA > ColB
-
-Column A: BBandTop(C,20,S,2)
-Column B: BBandBot(C,20,S,2)
-Column C: BBandTop(C,20,S,2) - BBandBot(C,20,S,2)
+Column A: Mov(C,20,S)
+Column B: Ref(Mov(C,20,S),-1)
+Filter: ColA > ColB
+Column A: C
+Column B: Mov(C,50,S)
+Filter: ColA > ColB
 ```
-
 
 ## What Not To Do
 
-- Do not write `Ref(ColA,-1)` in an Explorer filter.
-- Do not use `Simulation.LongPositionCount` in Explorer.
-- Do not use `OPT1` in Explorer.
-- Do not reference values after the exploration date.
+- Bad: `Filter: Ref(ColA,-1) > ColB`.
+- Bad: `Column A: C` then `Filter: ColB > 0` when Column B is undefined.
+- Bad: `Filter: C > Ref(C,1)` for live Explorer scans.
+- Bad: using `OPT1` or simulation functions in Explorer.
+
+## Validation checklist
+
+- Every `ColX` in the filter has a matching column definition.
+- No historical function wraps a `ColX` reference.
+- No positive `Ref(...,1)` unless explicitly marked as historical hindsight.
+- No System Tester-only function appears in Explorer output.
+- All formulas use MetaStock syntax, not Python/C syntax.
+
+## Related functions and concepts
+
+- template.explorer_columns_filter
+- reference.lookahead_future_reference_pitfalls
+- reference.system_tester_vs_explorer_limits
+
+
+
+## Test Queries
+
+- Why is Ref(ColA,-1) invalid in Explorer?
+- Generate an Explorer filter using previous close safely.
