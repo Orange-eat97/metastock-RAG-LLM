@@ -7,6 +7,7 @@ from src.queryDecomposition.query_decomposer import (
 from src.queryDecomposition.registry_resolver import (
     AliasMatch,
     RegistryCard,
+    RegistryConcept,
     RegistryResolver,
 )
 from src.queryDecomposition.retrieval_planner import (
@@ -21,6 +22,7 @@ __all__ = [
     "get_seed_canonical_ids",
     "AliasMatch",
     "RegistryCard",
+    "RegistryConcept",
     "RegistryResolver",
     "RetrievalPlan",
     "RetrievalPlanner",

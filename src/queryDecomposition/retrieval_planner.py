@@ -6,7 +6,6 @@ from typing import Sequence
 from supabase import Client
 
 from src.queryDecomposition.query_decomposer import (
-    Bucket,
     RetrievalIntent,
     decompose_query_for_retrieval,
     get_seed_canonical_ids,
@@ -16,6 +15,7 @@ from src.queryDecomposition.registry_resolver import (
     DEFAULT_MAX_DEPENDENCY_DEPTH,
     AliasMatch,
     RegistryCard,
+    RegistryConcept,
     RegistryResolver,
 )
 
@@ -92,7 +92,8 @@ class RetrievalPlanner:
         build a retrieval plan for this query.
 
     This object owns:
-    - query decomposition;
+    - loading active registry concepts;
+    - LLM seed extraction;
     - registry alias hints;
     - canonical ID collection;
     - dependency expansion through Supabase;
@@ -115,11 +116,17 @@ class RetrievalPlanner:
         self.max_dependency_depth = max_dependency_depth
 
     def build_plan(self, user_query: str) -> RetrievalPlan:
-        intents = decompose_query_for_retrieval(user_query)
+        active_concepts = self.resolver.fetch_active_concepts()
+
+        intents = decompose_query_for_retrieval(
+            user_query=user_query,
+            available_concepts=active_concepts,
+        )
 
         seed_canonical_ids = get_seed_canonical_ids(intents)
 
         alias_matches: list[AliasMatch] = []
+
         if self.include_alias_hints:
             alias_matches = self.resolver.match_aliases(
                 query_text=user_query,
@@ -143,21 +150,51 @@ class RetrievalPlanner:
             alias_matches=alias_matches,
             resolved_cards=resolved_cards,
             missing_seed_canonical_ids=missing_seed_canonical_ids,
-            retrieval_queries_by_bucket=_group_queries_by_bucket(intents),
+            retrieval_queries_by_bucket=_group_queries_by_bucket(
+                intents=intents,
+                active_concepts=active_concepts,
+            ),
         )
 
 
-def _group_queries_by_bucket(intents: list[RetrievalIntent]) -> dict[str, list[str]]:
+def _group_queries_by_bucket(
+    intents: list[RetrievalIntent],
+    active_concepts: list[RegistryConcept],
+) -> dict[str, list[str]]:
     grouped: dict[str, list[str]] = {
         "patterns": [],
         "functions": [],
         "references": [],
     }
 
-    for intent in intents:
-        grouped.setdefault(intent.target_bucket, [])
+    concept_bucket_lookup = {
+        concept.canonical_id: _safe_bucket(concept.card_bucket)
+        for concept in active_concepts
+    }
 
-        if intent.query not in grouped[intent.target_bucket]:
-            grouped[intent.target_bucket].append(intent.query)
+    for intent in intents:
+        bucket = _safe_bucket(intent.target_bucket)
+        grouped.setdefault(bucket, [])
+
+        if intent.query not in grouped[bucket]:
+            grouped[bucket].append(intent.query)
+
+        for canonical_id in intent.seed_canonical_ids:
+            concept_bucket = concept_bucket_lookup.get(canonical_id)
+
+            if concept_bucket and intent.query not in grouped[concept_bucket]:
+                grouped[concept_bucket].append(intent.query)
 
     return grouped
+
+
+def _safe_bucket(value: str) -> str:
+    normalized = str(value or "references").lower().strip()
+
+    if normalized in {"pattern", "patterns"}:
+        return "patterns"
+
+    if normalized in {"function", "functions"}:
+        return "functions"
+
+    return "references"

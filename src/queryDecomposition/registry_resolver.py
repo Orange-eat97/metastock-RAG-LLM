@@ -11,6 +11,31 @@ DEFAULT_MAX_DEPENDENCY_DEPTH = 5
 
 
 @dataclass(frozen=True)
+class RegistryConcept:
+    canonical_id: str
+    title: str
+    concept_type: str
+    card_bucket: str
+    source_path: str
+    aliases: tuple[str, ...]
+
+    @classmethod
+    def from_registry_row(
+        cls,
+        row: dict[str, Any],
+        aliases: Sequence[str],
+    ) -> "RegistryConcept":
+        return cls(
+            canonical_id=row.get("canonical_id", ""),
+            title=row.get("title", ""),
+            concept_type=row.get("concept_type", ""),
+            card_bucket=row.get("card_bucket", ""),
+            source_path=row.get("source_path", ""),
+            aliases=tuple(aliases),
+        )
+
+
+@dataclass(frozen=True)
 class RegistryCard:
     canonical_id: str
     source_path: str
@@ -50,10 +75,6 @@ class RegistryCard:
         )
 
     def to_rag_card_row(self) -> dict[str, Any]:
-        """
-        Convert the registry-resolved card into the same row shape used by
-        context_builder.make_dynamic_item().
-        """
         return {
             "card_id": self.card_id,
             "title": self.card_title or self.registry_title,
@@ -94,16 +115,60 @@ class AliasMatch:
 class RegistryResolver:
     """
     Resolves canonical concept IDs through the Supabase registry graph.
-
-    Tell-style API:
-        resolver.resolve_cards(seed_canonical_ids)
-
-    The caller does not fetch registry tables, expand dependencies, or match
-    source paths itself. That logic stays behind this object.
     """
 
     def __init__(self, supabase: Client):
         self.supabase = supabase
+
+    def fetch_active_concepts(self) -> list[RegistryConcept]:
+        concept_response = (
+            self.supabase.table("rag_card_registry")
+            .select("canonical_id,title,concept_type,card_bucket,source_path")
+            .eq("is_active", True)
+            .execute()
+        )
+
+        concept_rows = concept_response.data or []
+
+        alias_response = (
+            self.supabase.table("rag_card_aliases")
+            .select("canonical_id,alias_text,weight")
+            .eq("is_active", True)
+            .execute()
+        )
+
+        alias_rows = alias_response.data or []
+
+        aliases_by_concept: dict[str, list[tuple[float, str]]] = {}
+
+        for row in alias_rows:
+            canonical_id = row.get("canonical_id")
+            alias_text = row.get("alias_text")
+
+            if not canonical_id or not alias_text:
+                continue
+
+            aliases_by_concept.setdefault(canonical_id, []).append(
+                (float(row.get("weight") or 0), str(alias_text))
+            )
+
+        concepts: list[RegistryConcept] = []
+
+        for row in concept_rows:
+            canonical_id = row.get("canonical_id", "")
+            weighted_aliases = aliases_by_concept.get(canonical_id, [])
+            weighted_aliases.sort(key=lambda item: item[0], reverse=True)
+            aliases = [alias for _, alias in weighted_aliases]
+
+            concepts.append(
+                RegistryConcept.from_registry_row(
+                    row=row,
+                    aliases=aliases,
+                )
+            )
+
+        concepts.sort(key=lambda c: (c.concept_type, c.canonical_id))
+        return concepts
 
     def match_aliases(
         self,
@@ -118,7 +183,10 @@ class RegistryResolver:
             },
         ).execute()
 
-        return [AliasMatch.from_rpc_row(row) for row in (response.data or [])]
+        return [
+            AliasMatch.from_rpc_row(row)
+            for row in (response.data or [])
+        ]
 
     def resolve_cards(
         self,
@@ -126,14 +194,6 @@ class RegistryResolver:
         allowed_edge_types: Sequence[str] = DEFAULT_ALLOWED_EDGE_TYPES,
         max_depth: int = DEFAULT_MAX_DEPENDENCY_DEPTH,
     ) -> tuple[list[RegistryCard], list[str]]:
-        """
-        Expand seed concepts through registry dependencies and return actual
-        rag_cards rows.
-
-        Returns:
-        - resolved registry cards
-        - missing seed canonical IDs
-        """
         ordered_seed_ids = _dedupe_preserve_order(seed_canonical_ids)
 
         if not ordered_seed_ids:
@@ -151,11 +211,14 @@ class RegistryResolver:
         rows = response.data or []
         cards = [RegistryCard.from_rpc_row(row) for row in rows]
 
-        # Keep only cards that actually resolve to a rag_cards row with body.
-        # The missing list below still reports unresolved seed IDs.
-        cards = [card for card in cards if card.card_id and card.body_markdown]
+        cards = [
+            card
+            for card in cards
+            if card.card_id and card.body_markdown
+        ]
 
         resolved_ids = {card.canonical_id for card in cards}
+
         missing_seed_ids = [
             canonical_id
             for canonical_id in ordered_seed_ids

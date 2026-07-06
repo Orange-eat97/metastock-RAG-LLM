@@ -1,11 +1,24 @@
 from __future__ import annotations
 
-import re
+import difflib
+import json
+import os
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal, Mapping, Sequence
+
+from dotenv import load_dotenv
+from openai import OpenAI
+
+
+load_dotenv()
 
 
 Bucket = Literal["patterns", "functions", "references"]
+
+DEFAULT_SEED_PLANNER_MODEL = os.getenv(
+    "SEED_PLANNER_MODEL",
+    os.getenv("OPENAI_MODEL", "gpt-4.1-mini"),
+)
 
 
 @dataclass(frozen=True)
@@ -38,241 +51,58 @@ class RetrievalIntent:
         return self.seed_canonical_ids
 
 
-def _normalize_query(user_query: str) -> str:
-    return " ".join(user_query.lower().strip().split())
+@dataclass(frozen=True)
+class PlannerConcept:
+    canonical_id: str
+    title: str
+    concept_type: str
+    card_bucket: str
+    source_path: str
+    aliases: tuple[str, ...] = field(default_factory=tuple)
 
 
-def _has_any(text: str, phrases: list[str]) -> bool:
-    return any(phrase in text for phrase in phrases)
-
-
-def _has_token(text: str, token: str) -> bool:
+def decompose_query_for_retrieval(
+    user_query: str,
+    available_concepts: Sequence[Any] | None = None,
+    *,
+    model: str | None = None,
+) -> list[RetrievalIntent]:
     """
-    Match a standalone token only.
+    LLM seed extractor.
 
-    This prevents the old bug where "making" matched "MA" because it contained
-    the substring " ma".
+    This replaces the old string/regex seed matching.
+
+    Boundary:
+    - Extract seed canonical IDs only.
+    - Do not expand dependencies here.
+    - Dependency expansion belongs to Supabase registry resolver.
     """
-    escaped = re.escape(token.lower())
-    return re.search(rf"(^|[^a-z0-9]){escaped}([^a-z0-9]|$)", text) is not None
+    concepts = _coerce_concepts(available_concepts or [])
 
+    if not concepts:
+        print(
+            "[query_decomposer] No active registry concepts were supplied; "
+            "falling back to original-query retrieval only."
+        )
+        return _fallback_intents(user_query)
 
-def _has_moving_average_intent(text: str) -> bool:
-    if _has_any(
-        text,
-        [
-            "moving average",
-            "simple moving average",
-            "exponential moving average",
-            "weighted moving average",
-            "simple average",
-            "exponential average",
-        ],
-    ):
-        return True
-
-    return any(
-        _has_token(text, token)
-        for token in ["ma", "sma", "ema"]
+    raw_plan = _call_llm_seed_planner(
+        user_query=user_query,
+        concepts=concepts,
+        model=model or DEFAULT_SEED_PLANNER_MODEL,
     )
 
+    intents = _build_intents_from_llm_plan(
+        user_query=user_query,
+        concepts=concepts,
+        raw_plan=raw_plan,
+    )
 
-def _has_previous_or_new_low_intent(text: str) -> bool:
-    if _has_any(
-        text,
-        [
-            "previous low",
-            "prior low",
-            "new low",
-            "breaking below",
-            "break below",
-            "breakdown",
-            "break down",
-        ],
-    ):
-        return True
-
-    regex_patterns = [
-        r"\bnew\s+\d+\s*(day|period|bar)?\s+low\b",
-        r"\bmaking\s+a\s+new\s+\d+\s*(day|period|bar)?\s+low\b",
-        r"\bmaking\s+new\s+\d+\s*(day|period|bar)?\s+low\b",
-        r"\b\d+\s*(day|period|bar)?\s+low\b",
-    ]
-
-    return any(re.search(pattern, text) for pattern in regex_patterns)
-
-
-def _extract_period(text: str, default: int = 20) -> int:
-    """
-    Lightweight period extractor.
-
-    Examples:
-    - previous 20 day high -> 20
-    - 50 day moving average -> 50
-    - 30 period volume average -> 30
-    """
-    patterns = [
-        r"previous\s+(\d+)\s*(day|period|bar)?",
-        r"prior\s+(\d+)\s*(day|period|bar)?",
-        r"new\s+(\d+)\s*(day|period|bar)?",
-        r"(\d+)\s*(day|period|bar)?\s*high",
-        r"(\d+)\s*(day|period|bar)?\s*low",
-        r"(\d+)\s*(day|period|bar)?\s*moving average",
-        r"(\d+)\s*(day|period|bar)?\s*ma\b",
-        r"(\d+)\s*(day|period|bar)?\s*average",
-    ]
-
-    for pattern in patterns:
-        match = re.search(pattern, text)
-        if match:
-            return int(match.group(1))
-
-    return default
-
-
-def decompose_query_for_retrieval(user_query: str) -> list[RetrievalIntent]:
-    """
-    Deterministic retrieval decomposition.
-
-    The decomposer maps user language to seed canonical concepts only.
-    It does NOT expand dependencies like:
-        pattern.breakout -> function.hhv + function.ref
-
-    Dependency expansion is handled by the registry resolver through Supabase.
-    """
-    q = _normalize_query(user_query)
-    intents: list[RetrievalIntent] = []
-
-    # Volume above average.
-    if _has_any(
-        q,
-        [
-            "volume above average",
-            "above average volume",
-            "average volume",
-            "high volume",
-            "volume spike",
-            "volume surge",
-            "unusual volume",
-        ],
-    ):
-        intents.append(
-            RetrievalIntent(
-                query="volume above average high volume volume spike average volume",
-                target_bucket="patterns",
-                reason="User asks for above-average volume or volume confirmation.",
-                seed_canonical_ids=("pattern.volume_above_average",),
-                source_rule="volume_above_average_pattern",
-            )
-        )
-
-    # Breakout / previous high.
-    if _has_any(
-        q,
-        [
-            "breakout",
-            "break out",
-            "breaking above",
-            "break above",
-            "above previous high",
-            "above prior high",
-            "new high",
-            "previous high",
-            "prior high",
-        ],
-    ):
-        period = _extract_period(q, default=20)
-
-        intents.append(
-            RetrievalIntent(
-                query=f"price breakout above previous {period} period high resistance breakout",
-                target_bucket="patterns",
-                reason="User asks for a price breakout above a previous high.",
-                seed_canonical_ids=("pattern.breakout",),
-                source_rule="breakout_pattern",
-            )
-        )
-
-    # Moving average.
-    if _has_moving_average_intent(q):
-        period = _extract_period(q, default=50)
-
-        intents.append(
-            RetrievalIntent(
-                query=f"Mov moving average close {period} day simple exponential moving average",
-                target_bucket="functions",
-                reason="User mentions moving average.",
-                seed_canonical_ids=("function.mov",),
-                source_rule="moving_average_function",
-            )
-        )
-
-    # RSI.
-    if _has_any(
-        q,
-        [
-            "rsi",
-            "relative strength index",
-            "oversold",
-            "overbought",
-        ],
-    ):
-        intents.append(
-            RetrievalIntent(
-                query="RSI relative strength index oversold overbought RSI(14)",
-                target_bucket="functions",
-                reason="User mentions RSI or RSI-style overbought/oversold condition.",
-                seed_canonical_ids=("function.rsi",),
-                source_rule="rsi_function",
-            )
-        )
-
-    # Cross above / cross below.
-    if _has_any(
-        q,
-        [
-            "cross above",
-            "crosses above",
-            "crossover",
-            "cross over",
-            "cross below",
-            "crosses below",
-            "crossunder",
-            "cross under",
-        ],
-    ):
-        intents.append(
-            RetrievalIntent(
-                query="Cross function crossover cross above cross below Cross(DATA ARRAY 1, DATA ARRAY 2)",
-                target_bucket="functions",
-                reason="User mentions a crossing condition.",
-                seed_canonical_ids=("function.cross",),
-                source_rule="cross_function",
-            )
-        )
-
-    # Previous low / new low.
-    # There is currently no confirmed pattern.new_low or pattern.breakdown card.
-    # Therefore this maps directly to confirmed function cards.
-    if _has_previous_or_new_low_intent(q):
-        period = _extract_period(q, default=20)
-
-        intents.append(
-            RetrievalIntent(
-                query=f"LLV lowest low previous {period} periods new low previous low breakdown support",
-                target_bucket="functions",
-                reason="New-low or previous-low conditions require LLV.",
-                seed_canonical_ids=("function.llv", "function.ref"),
-                source_rule="new_or_previous_low_functions",
-            )
-        )
-
-    # Fallback: keep original semantic query.
     intents.append(
         RetrievalIntent(
             query=user_query,
             target_bucket="references",
-            reason="Fallback retrieval using the original query.",
+            reason="Fallback retrieval using original query.",
             seed_canonical_ids=(),
             source_rule="original_query_fallback",
         )
@@ -300,6 +130,312 @@ def get_forced_card_names(intents: list[RetrievalIntent]) -> list[str]:
     Prefer get_seed_canonical_ids() in new code.
     """
     return get_seed_canonical_ids(intents)
+
+
+def _call_llm_seed_planner(
+    user_query: str,
+    concepts: list[PlannerConcept],
+    model: str,
+) -> dict[str, Any]:
+    api_key = os.getenv("OPENAI_API_KEY")
+
+    if not api_key:
+        print(
+            "[query_decomposer] Missing OPENAI_API_KEY; "
+            "falling back to original-query retrieval only."
+        )
+        return {"intents": [], "proposed_missing_seed_ids": [], "unknown_terms": []}
+
+    client = OpenAI(api_key=api_key)
+
+    messages = [
+        {
+            "role": "system",
+            "content": _build_system_prompt(),
+        },
+        {
+            "role": "user",
+            "content": json.dumps(
+                {
+                    "user_query": user_query,
+                    "available_concepts": _concepts_for_prompt(concepts),
+                },
+                ensure_ascii=False,
+            ),
+        },
+    ]
+
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0,
+            response_format={"type": "json_object"},
+        )
+
+        content = response.choices[0].message.content or "{}"
+        parsed = json.loads(content)
+
+        if not isinstance(parsed, dict):
+            raise ValueError("LLM planner response was not a JSON object.")
+
+        return parsed
+
+    except Exception as exc:
+        print(
+            "[query_decomposer] LLM seed planner failed; "
+            f"falling back to original-query retrieval only. Error: {exc}"
+        )
+        return {"intents": [], "proposed_missing_seed_ids": [], "unknown_terms": []}
+
+
+def _build_system_prompt() -> str:
+    return """
+You are a retrieval seed planner for a MetaStock Explorer RAG system.
+
+Your job is NOT to write a MetaStock formula.
+Your job is to identify which canonical knowledge-card concepts are needed for retrieval.
+
+You receive:
+- a user query;
+- a list of active registry concepts from Supabase.
+
+Return JSON only with this shape:
+{
+  "intents": [
+    {
+      "seed_canonical_ids": ["one or more canonical IDs"],
+      "target_bucket": "patterns" | "functions" | "references",
+      "retrieval_query": "short semantic retrieval query",
+      "reason": "brief reason"
+    }
+  ],
+  "proposed_missing_seed_ids": ["canonical IDs that would be useful but are not available"],
+  "unknown_terms": ["terms you could not map"]
+}
+
+Rules:
+1. Prefer available concepts. Use only canonical_id values from available_concepts when possible.
+2. Do not invent a concept if an available concept reasonably covers the request.
+3. If a useful pattern concept is missing, put its proposed canonical ID in proposed_missing_seed_ids.
+4. Examples:
+   - "volume above average" should use pattern.volume_above_average if available.
+   - "break above previous high" should use pattern.breakout if available.
+   - "new low" should use pattern.new_low if available; otherwise use function.llv and function.ref if available, and optionally propose pattern.new_low.
+   - "MA crossover" should use function.cross and function.mov unless a pattern.crossover card exists.
+5. Choose seed concepts only. Do not manually expand dependencies that the graph should expand from pattern cards.
+6. But if no pattern card exists and only function cards cover the request, choose the function cards.
+7. Keep retrieval_query concise and useful for vector retrieval.
+""".strip()
+
+
+def _concepts_for_prompt(concepts: list[PlannerConcept]) -> list[dict[str, Any]]:
+    return [
+        {
+            "canonical_id": concept.canonical_id,
+            "title": concept.title,
+            "concept_type": concept.concept_type,
+            "card_bucket": concept.card_bucket,
+            "source_path": concept.source_path,
+            "aliases": list(concept.aliases[:12]),
+        }
+        for concept in concepts
+    ]
+
+
+def _build_intents_from_llm_plan(
+    user_query: str,
+    concepts: list[PlannerConcept],
+    raw_plan: dict[str, Any],
+) -> list[RetrievalIntent]:
+    concept_lookup = {concept.canonical_id: concept for concept in concepts}
+
+    intents: list[RetrievalIntent] = []
+
+    raw_intents = raw_plan.get("intents") or []
+    if not isinstance(raw_intents, list):
+        raw_intents = []
+
+    for raw_intent in raw_intents:
+        if not isinstance(raw_intent, Mapping):
+            continue
+
+        raw_seed_ids = raw_intent.get("seed_canonical_ids") or []
+
+        if isinstance(raw_seed_ids, str):
+            raw_seed_ids = [raw_seed_ids]
+
+        if not isinstance(raw_seed_ids, list):
+            continue
+
+        valid_seed_ids: list[str] = []
+
+        for raw_seed_id in raw_seed_ids:
+            seed_id = str(raw_seed_id).strip()
+
+            if not seed_id:
+                continue
+
+            if seed_id not in concept_lookup:
+                _print_missing_seed_message(seed_id, concepts)
+                continue
+
+            if seed_id not in valid_seed_ids:
+                valid_seed_ids.append(seed_id)
+
+        if not valid_seed_ids:
+            continue
+
+        target_bucket = _safe_bucket(
+            raw_intent.get("target_bucket"),
+            default=concept_lookup[valid_seed_ids[0]].card_bucket,
+        )
+
+        retrieval_query = str(raw_intent.get("retrieval_query") or user_query).strip()
+        reason = str(
+            raw_intent.get("reason")
+            or "LLM selected registry seed concepts."
+        ).strip()
+
+        intents.append(
+            RetrievalIntent(
+                query=retrieval_query,
+                target_bucket=target_bucket,
+                reason=reason,
+                seed_canonical_ids=tuple(valid_seed_ids),
+                source_rule="llm_seed_planner",
+            )
+        )
+
+    proposed_missing = raw_plan.get("proposed_missing_seed_ids") or []
+
+    if isinstance(proposed_missing, str):
+        proposed_missing = [proposed_missing]
+
+    if isinstance(proposed_missing, list):
+        for raw_seed_id in proposed_missing:
+            seed_id = str(raw_seed_id).strip()
+
+            if seed_id and seed_id not in concept_lookup:
+                _print_missing_seed_message(seed_id, concepts)
+
+    return intents
+
+
+def _safe_bucket(value: Any, default: str) -> Bucket:
+    normalized = str(value or default or "references").strip().lower()
+
+    if normalized in {"pattern", "patterns"}:
+        return "patterns"
+
+    if normalized in {"function", "functions"}:
+        return "functions"
+
+    return "references"
+
+
+def _print_missing_seed_message(seed_id: str, concepts: list[PlannerConcept]) -> None:
+    similar = _find_most_similar_concept(seed_id, concepts)
+
+    print(f"[query_decomposer] Skipping seed not found in Supabase registry: {seed_id}")
+
+    if similar is not None:
+        print(
+            "[query_decomposer] Most similar existing concept: "
+            f"{similar.canonical_id} | {similar.title} | {similar.source_path}"
+        )
+
+    print(f"suggest adding {seed_id} card")
+
+
+def _find_most_similar_concept(
+    seed_id: str,
+    concepts: list[PlannerConcept],
+) -> PlannerConcept | None:
+    if not concepts:
+        return None
+
+    def score(concept: PlannerConcept) -> float:
+        candidates = [
+            concept.canonical_id,
+            concept.title,
+            concept.source_path,
+            *concept.aliases,
+        ]
+
+        return max(
+            difflib.SequenceMatcher(
+                None,
+                seed_id.lower(),
+                str(candidate).lower(),
+            ).ratio()
+            for candidate in candidates
+            if str(candidate).strip()
+        )
+
+    return max(concepts, key=score)
+
+
+def _coerce_concepts(values: Sequence[Any]) -> list[PlannerConcept]:
+    concepts: list[PlannerConcept] = []
+
+    for value in values:
+        concept = _coerce_one_concept(value)
+
+        if concept is not None:
+            concepts.append(concept)
+
+    concepts.sort(key=lambda c: (c.concept_type, c.canonical_id))
+    return concepts
+
+
+def _coerce_one_concept(value: Any) -> PlannerConcept | None:
+    def get(name: str, default: Any = "") -> Any:
+        if isinstance(value, Mapping):
+            return value.get(name, default)
+        return getattr(value, name, default)
+
+    canonical_id = str(get("canonical_id", "")).strip()
+
+    if not canonical_id:
+        return None
+
+    aliases_raw = get("aliases", ())
+
+    if aliases_raw is None:
+        aliases: tuple[str, ...] = ()
+    elif isinstance(aliases_raw, str):
+        aliases = (aliases_raw,)
+    else:
+        aliases = tuple(
+            str(alias)
+            for alias in aliases_raw
+            if str(alias).strip()
+        )
+
+    return PlannerConcept(
+        canonical_id=canonical_id,
+        title=str(get("title", get("registry_title", canonical_id)) or canonical_id),
+        concept_type=str(get("concept_type", "") or ""),
+        card_bucket=str(
+            get("card_bucket", get("registry_bucket", "references"))
+            or "references"
+        ),
+        source_path=str(get("source_path", "") or ""),
+        aliases=aliases,
+    )
+
+
+def _fallback_intents(user_query: str) -> list[RetrievalIntent]:
+    return [
+        RetrievalIntent(
+            query=user_query,
+            target_bucket="references",
+            reason="Fallback retrieval using original query.",
+            seed_canonical_ids=(),
+            source_rule="original_query_fallback",
+        )
+    ]
 
 
 def _dedupe_intents(intents: list[RetrievalIntent]) -> list[RetrievalIntent]:
