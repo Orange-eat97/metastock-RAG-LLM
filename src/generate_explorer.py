@@ -372,25 +372,13 @@ def run_one_query(
             "--run-automator requires saving to Excel. Remove --no-save."
         )
 
-    print("\n[generate_explorer] Building context...")
-    context, dynamic_items = build_context_for_query(user_query)
-
-    prompt = build_prompt(user_query, context)
-
-    print_context_summary(
-        user_query=user_query,
-        dynamic_items=dynamic_items,
-        prompt=prompt,
-    )
-
-    if dry_run:
-        print("\n[DRY RUN] LLM call skipped.")
-        return
-    
-        cached_row: dict[str, Any] | None = None
+    cached_row: dict[str, Any] | None = None
     cached_explorer_id: str | None = None
 
-    if use_supabase_cache:
+    # ============================================================
+    # Supabase cache check FIRST
+    # ============================================================
+    if use_supabase_cache and not dry_run:
         print("\n[generate_explorer] Checking Supabase cache for exact user_query match...")
 
         cached_row = find_cached_explorer_output_by_query(
@@ -410,7 +398,7 @@ def run_one_query(
             print("\n=== Explorer Output ===")
             print(json.dumps(output, indent=2))
 
-            errors = validate_explorer_output(output)
+            errors = validate_explorer_output(output) or []
 
             print("\n=== Validation ===")
             if errors:
@@ -420,7 +408,6 @@ def run_one_query(
             else:
                 print("[PASSED]")
 
-            # Optional: still export cached result to Excel for local visibility.
             saved_path: Path | None = None
 
             if save_output:
@@ -440,6 +427,12 @@ def run_one_query(
                         "Automator currently needs Excel bridge. Keep save_output=True."
                     )
 
+                if errors and not allow_invalid:
+                    raise RuntimeError(
+                        "Cached Explorer failed validation, so automator was not called. "
+                        "Use --allow-invalid only if you intentionally want to test invalid output."
+                    )
+
                 call_automator_latest_llm_result(
                     excel_path=saved_path,
                     automator_runner=automator_runner,
@@ -451,8 +444,32 @@ def run_one_query(
 
             return
 
-        print("[generate_explorer] Supabase cache miss. Calling GPT.")
-    
+        print("[generate_explorer] Supabase cache miss. Building context and calling GPT.")
+
+    # ============================================================
+    # Build RAG context only after cache miss / dry-run
+    # ============================================================
+    print("\n[generate_explorer] Building context...")
+    context, dynamic_items = build_context_for_query(user_query)
+
+    prompt = build_prompt(user_query, context)
+
+    print_context_summary(
+        user_query=user_query,
+        dynamic_items=dynamic_items,
+        prompt=prompt,
+    )
+
+    if dry_run:
+        if show_prompt:
+            print("\n" + "=" * 100)
+            print("FULL DRY RUN PROMPT")
+            print("=" * 100)
+            print(prompt)
+
+        print("\n[DRY RUN] LLM call skipped.")
+        return
+
     print("\n[generate_explorer] Calling LLM...")
 
     output = generate_with_openai(prompt)
@@ -460,7 +477,7 @@ def run_one_query(
     print("\n=== Explorer Output ===")
     print(json.dumps(output, indent=2))
 
-    errors = validate_explorer_output(output)
+    errors = validate_explorer_output(output) or []
 
     print("\n=== Validation ===")
     if errors:
@@ -494,7 +511,7 @@ def run_one_query(
             validation_errors=errors,
         )
 
-        print(f"\n[generate_explorer] Saved output to Supabase.")
+        print("\n[generate_explorer] Saved output to Supabase.")
         print(f"[generate_explorer] explorer_id: {explorer_id}")
 
     if run_automator:

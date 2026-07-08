@@ -57,6 +57,7 @@ from openai import OpenAI
 from supabase import Client, create_client
 
 from src.queryDecomposition.retrieval_planner import RetrievalPlanner
+from src.retrieval.reranker import rerank_items
 
 
 load_dotenv()
@@ -65,11 +66,18 @@ load_dotenv()
 EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 
 DEFAULT_TOP_K = 12
-DEFAULT_MAX_DYNAMIC_FILES = 5
+DEFAULT_MAX_DYNAMIC_FILES = 10
+
+# Pull a wider optional pool, then rerank down to DEFAULT_MAX_DYNAMIC_FILES.
+# Forced registry cards do not use this budget and are still preserved first.
+DEFAULT_OPTIONAL_VECTOR_POOL_MULTIPLIER = 3
+DEFAULT_OPTIONAL_LEXICAL_POOL_PER_BUCKET = 80
 
 RETRIEVAL_BACKEND = "supabase"
 BASE_CONTEXT_SOURCE = "supabase.rag_cards"
 DYNAMIC_CONTEXT_SOURCE = "supabase.rpc.match_rag_cards"
+LEXICAL_CONTEXT_SOURCE = "supabase.rag_cards.local_bm25"
+HYBRID_CONTEXT_SOURCE = "hybrid.vector_bm25_rerank"
 FORCED_CONTEXT_SOURCE = "supabase.registry.resolve_rag_registry_cards"
 
 
@@ -185,6 +193,22 @@ def make_dynamic_item(
     }
 
 
+def dedupe_best_by_path(items: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Deduplicate candidate items by source path, keeping the highest score."""
+    best_by_file: dict[str, dict[str, Any]] = {}
+
+    for item in items:
+        key = normalize_filename(item.get("file_path", ""))
+        if not key:
+            continue
+
+        current = best_by_file.get(key)
+        if current is None or float(item.get("score") or 0) > float(current.get("score") or 0):
+            best_by_file[key] = item
+
+    return list(best_by_file.values())
+
+
 # ============================================================
 # Base context
 # ============================================================
@@ -291,52 +315,128 @@ def retrieve_cards_from_supabase(
     return response.data or []
 
 
-def retrieve_unique_dynamic_context(
-    query: str,
-    top_k: int = DEFAULT_TOP_K,
-    max_dynamic_files: int = DEFAULT_MAX_DYNAMIC_FILES,
+def fetch_lexical_candidate_rows(
+    supabase: Client,
+    *,
+    filter_card_bucket: str | None = None,
 ) -> list[dict[str, Any]]:
     """
-    Retrieve many cards from Supabase, then deduplicate by source_path.
+    Fetch a small local BM25 candidate corpus from rag_cards.
 
-    This is the non-planned fallback path.
+    This is deliberately simple because the current knowledge base is card-sized
+    rather than document-sized. It gives BM25 the chance to recover exact syntax
+    terms such as Mov, RSI, Ref, HHV, LLV, Cross, ColA, and Bollinger function
+    names even when dense vector retrieval misses them.
     """
-    supabase = make_supabase_client()
-    openai_client = make_openai_client()
-
-    query_embedding = create_query_embedding(openai_client, query)
-
-    rows = retrieve_cards_from_supabase(
-        supabase=supabase,
-        query_embedding=query_embedding,
-        top_k=top_k,
-        filter_card_type=None,
-        filter_card_bucket=None,
+    query = supabase.table("rag_cards").select(
+        "card_id,title,card_type,card_bucket,category,source_path,body_markdown"
     )
 
-    best_by_file: dict[str, dict[str, Any]] = {}
+    if filter_card_bucket:
+        query = query.eq("card_bucket", filter_card_bucket)
 
-    for row in rows:
+    response = query.execute()
+    return response.data or []
+
+
+def retrieve_lexical_candidates(
+    supabase: Client,
+    *,
+    filter_card_bucket: str | None = None,
+    limit: int = DEFAULT_OPTIONAL_LEXICAL_POOL_PER_BUCKET,
+) -> list[dict[str, Any]]:
+    """
+    Return lexical/BM25 candidate items before final hybrid reranking.
+
+    The actual BM25 score is assigned in rerank_items(), where vector and lexical
+    candidates are combined into one pool.
+    """
+    print(
+        "[context_builder] Loading lexical candidate pool from "
+        f"{LEXICAL_CONTEXT_SOURCE} | "
+        f"filter_card_bucket={filter_card_bucket}"
+    )
+
+    rows = fetch_lexical_candidate_rows(
+        supabase,
+        filter_card_bucket=filter_card_bucket,
+    )
+
+    items: list[dict[str, Any]] = []
+    for row in rows[:limit]:
         source_path = row.get("source_path", "")
         title = row.get("title", "")
 
         if should_exclude_from_dynamic(source_path=source_path, title=title):
             continue
 
-        key = normalize_filename(source_path)
-        item = make_dynamic_item(row)
-        current = best_by_file.get(key)
+        items.append(
+            make_dynamic_item(
+                row,
+                retrieval_source=LEXICAL_CONTEXT_SOURCE,
+                score=0.0,
+                retrieval_reason=f"lexical_candidate; bucket={filter_card_bucket or 'all'}",
+            )
+        )
 
-        if current is None or item["score"] > current["score"]:
-            best_by_file[key] = item
+    return items
 
-    ranked = sorted(
-        best_by_file.values(),
-        key=lambda x: x["score"],
-        reverse=True,
+
+# ============================================================
+# Hybrid optional retrieval
+# ============================================================
+
+
+def retrieve_unique_dynamic_context(
+    query: str,
+    top_k: int = DEFAULT_TOP_K,
+    max_dynamic_files: int = DEFAULT_MAX_DYNAMIC_FILES,
+) -> list[dict[str, Any]]:
+    """
+    Non-planned fallback path.
+
+    Before this change, this path used vector retrieval only. It now retrieves a
+    wider vector pool, adds a lexical card pool, deduplicates, then reranks with
+    vector + BM25 + metadata signals.
+    """
+    supabase = make_supabase_client()
+    openai_client = make_openai_client()
+
+    query_embedding = create_query_embedding(openai_client, query)
+
+    vector_rows = retrieve_cards_from_supabase(
+        supabase=supabase,
+        query_embedding=query_embedding,
+        top_k=max(top_k, max_dynamic_files * DEFAULT_OPTIONAL_VECTOR_POOL_MULTIPLIER),
+        filter_card_type=None,
+        filter_card_bucket=None,
     )
 
-    return ranked[:max_dynamic_files]
+    candidates: list[dict[str, Any]] = []
+
+    for row in vector_rows:
+        source_path = row.get("source_path", "")
+        title = row.get("title", "")
+
+        if should_exclude_from_dynamic(source_path=source_path, title=title):
+            continue
+
+        candidates.append(
+            make_dynamic_item(
+                row,
+                retrieval_source=DYNAMIC_CONTEXT_SOURCE,
+                retrieval_reason="fallback_vector_candidate",
+            )
+        )
+
+    candidates.extend(retrieve_lexical_candidates(supabase, filter_card_bucket=None))
+
+    reranked = rerank_items(
+        original_query=query,
+        items=dedupe_best_by_path(candidates),
+    )
+
+    return reranked[:max_dynamic_files]
 
 
 # ============================================================
@@ -359,8 +459,9 @@ def retrieve_planned_dynamic_context(
     This function only applies the returned plan:
     1. force-include registry-resolved cards;
     2. run bucketed vector retrieval using planned subqueries;
-    3. deduplicate by source_path;
-    4. return forced cards first, then vector results.
+    3. add lexical/BM25 candidates for optional retrieval;
+    4. rerank optional candidates with vector + BM25 + metadata signals;
+    5. return forced cards first, then reranked optional results.
     """
     supabase = make_supabase_client()
     openai_client = make_openai_client()
@@ -372,15 +473,15 @@ def retrieve_planned_dynamic_context(
 
     bucket_plan = {
         "patterns": {
-            "top_k": 4,
-            "min_keep": 2,
+            "top_k": 10,
+            "min_keep": 1,
         },
         "functions": {
-            "top_k": 4,
-            "min_keep": 3,
+            "top_k": 10,
+            "min_keep": 1,
         },
         "references": {
-            "top_k": 2,
+            "top_k": 6,
             "min_keep": 0,
         },
     }
@@ -417,23 +518,18 @@ def retrieve_planned_dynamic_context(
             print(f"- {canonical_id}")
 
     # If forced cards already fill the allowed dynamic slots, stop here.
-    # This prevents vector retrieval from displacing required cards.
+    # This prevents optional retrieval from displacing required cards.
     if len(selected) >= max_dynamic_files:
         return selected[:max_dynamic_files]
 
-    # Second: retrieve using planned subqueries by bucket.
-    bucket_results: dict[str, list[dict[str, Any]]] = {
+    # Second: build optional candidate pools by bucket.
+    bucket_candidates: dict[str, list[dict[str, Any]]] = {
         bucket: []
         for bucket in bucket_plan
     }
 
-    best_by_file: dict[str, dict[str, Any]] = {}
-
     for bucket, plan_config in bucket_plan.items():
         queries = plan.retrieval_queries_by_bucket.get(bucket, [])
-
-        if not queries:
-            continue
 
         for subquery in queries:
             query_embedding = create_query_embedding(openai_client, subquery)
@@ -454,34 +550,40 @@ def retrieve_planned_dynamic_context(
                     continue
 
                 key = normalize_filename(source_path)
-
                 if key in selected_paths:
                     continue
 
-                item = make_dynamic_item(
-                    row,
-                    retrieval_source=DYNAMIC_CONTEXT_SOURCE,
-                    retrieval_reason=f"bucket={bucket}; subquery={subquery}",
+                bucket_candidates[bucket].append(
+                    make_dynamic_item(
+                        row,
+                        retrieval_source=DYNAMIC_CONTEXT_SOURCE,
+                        retrieval_reason=f"vector_candidate; bucket={bucket}; subquery={subquery}",
+                    )
                 )
 
-                current = best_by_file.get(key)
+        # BM25 side of hybrid retrieval. This intentionally does not apply a
+        # lexical score yet; rerank_items() scores the combined candidate pool.
+        for item in retrieve_lexical_candidates(
+            supabase,
+            filter_card_bucket=bucket,
+            limit=DEFAULT_OPTIONAL_LEXICAL_POOL_PER_BUCKET,
+        ):
+            key = normalize_filename(item.get("file_path", ""))
+            if key in selected_paths:
+                continue
+            bucket_candidates[bucket].append(item)
 
-                if current is None or item["score"] > current["score"]:
-                    best_by_file[key] = item
-
-    for item in best_by_file.values():
-        bucket = item.get("card_bucket", "")
-
-        if bucket in bucket_results:
-            bucket_results[bucket].append(item)
-
-    for bucket in bucket_results:
-        bucket_results[bucket].sort(
-            key=lambda x: x["score"],
-            reverse=True,
+    # Third: rerank within each bucket, then keep a small minimum from each
+    # bucket so functions/patterns are not erased by one dominant bucket.
+    bucket_results: dict[str, list[dict[str, Any]]] = {}
+    for bucket, candidates in bucket_candidates.items():
+        bucket_results[bucket] = rerank_items(
+            original_query=query,
+            items=dedupe_best_by_path(candidates),
+            retrieval_queries_by_bucket=plan.retrieval_queries_by_bucket,
+            target_bucket=bucket,
         )
 
-    # Third: keep a minimum from each bucket, without displacing forced cards.
     for bucket, plan_config in bucket_plan.items():
         for item in bucket_results[bucket][: plan_config["min_keep"]]:
             if len(selected) >= max_dynamic_files:
@@ -495,7 +597,7 @@ def retrieve_planned_dynamic_context(
             selected.append(item)
             selected_paths.add(path)
 
-    # Fourth: fill remaining slots by global vector score.
+    # Fourth: fill remaining slots by global hybrid rerank score.
     remaining: list[dict[str, Any]] = []
 
     for items in bucket_results.values():
@@ -506,7 +608,11 @@ def retrieve_planned_dynamic_context(
                 remaining.append(item)
 
     remaining.sort(
-        key=lambda x: x["score"],
+        key=lambda x: (
+            float(x.get("rerank_score") or x.get("score") or 0.0),
+            float(x.get("bm25_score") or 0.0),
+            float(x.get("vector_score") or 0.0),
+        ),
         reverse=True,
     )
 
@@ -532,10 +638,10 @@ def retrieve_tiered_dynamic_context(
     """
     Backward-compatible public function name.
 
-    The old implementation retrieved the same query once per bucket. The new
+    The old implementation retrieved the same query once per bucket. The current
     implementation keeps tiered retrieval but routes planning through
     RetrievalPlanner, so required cards can be resolved through the registry
-    before vector results are added.
+    before optional hybrid vector/BM25 retrieval is added.
     """
     return retrieve_planned_dynamic_context(
         query=query,
@@ -553,6 +659,15 @@ def format_dynamic_context(items: Iterable[dict[str, Any]]) -> str:
     parts: list[str] = []
 
     for i, item in enumerate(items, start=1):
+        rerank_debug = ""
+        if "rerank_score" in item:
+            rerank_debug = (
+                f"Rerank score: {float(item.get('rerank_score') or 0):.4f}\n"
+                f"Vector score: {float(item.get('vector_score') or 0):.4f}\n"
+                f"BM25 score: {float(item.get('bm25_score') or 0):.4f}\n"
+                f"Metadata score: {float(item.get('metadata_score') or 0):.4f}\n"
+            )
+
         parts.append(
             f"## RETRIEVED CONTEXT {i}: {item['file_name']}\n"
             f"Card ID: {item['card_id']}\n"
@@ -562,7 +677,8 @@ def format_dynamic_context(items: Iterable[dict[str, Any]]) -> str:
             f"Retrieval backend: {item.get('retrieval_backend', 'unknown')}\n"
             f"Retrieval source: {item.get('retrieval_source', 'unknown')}\n"
             f"Retrieval reason: {item.get('retrieval_reason', '')}\n"
-            f"Retrieval score: {item['score']:.4f}\n\n"
+            f"Retrieval score: {item['score']:.4f}\n"
+            f"{rerank_debug}\n"
             f"{item['text']}"
         )
 

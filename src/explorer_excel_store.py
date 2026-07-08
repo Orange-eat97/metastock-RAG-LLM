@@ -62,7 +62,7 @@ def save_explorer_output_to_excel(
     user_query: str,
     backend: str,
     model: str,
-    validation_errors: list[str],
+    validation_errors: list[str] | None = None,
     excel_path: str | Path = DEFAULT_EXCEL_PATH,
 ) -> Path:
     """
@@ -74,20 +74,21 @@ def save_explorer_output_to_excel(
     path = Path(excel_path)
     wb, ws = _get_or_create_sheet(path)
 
-    validation_passed = len(validation_errors) == 0
+    validation_errors = validation_errors or []
+    validation_passed = not validation_errors
 
     row = [
-    datetime.now().isoformat(timespec="seconds"),
-    backend,
-    model,
-    user_query,
-    output.get("explorer_name", ""),
-    output.get("explorer_description", ""),
-    output.get("explorer_code_body", ""),
-    _json_dumps(output.get("col_definitions", [])),
-    validation_passed,
-    _json_dumps(validation_errors),
-    _json_dumps(output),
+        datetime.now().isoformat(timespec="seconds"),
+        backend,
+        model,
+        user_query,
+        output.get("explorer_name", ""),
+        output.get("explorer_description", ""),
+        output.get("explorer_code_body", ""),
+        _json_dumps(output.get("col_definitions", [])),
+        validation_passed,
+        _json_dumps(validation_errors),
+        _json_dumps(output),
     ]
 
     ws.append(row)
