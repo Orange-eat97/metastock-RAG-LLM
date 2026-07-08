@@ -32,14 +32,16 @@ def save_explorer_output_to_supabase(
     user_query: str,
     backend: str,
     model: str,
-    validation_errors: list[str],
+    validation_errors: list[str] | None = None,
 ) -> str:
+    
     """
     Insert one generated Explorer object into Supabase.
 
     Returns:
         explorer_outputs.id
     """
+    validation_errors = validation_errors or []
     explorer_name = str(output.get("explorer_name", "")).strip()
     explorer_description = str(output.get("explorer_description", "")).strip()
     explorer_code_body = str(output.get("explorer_code_body", "")).strip()
