@@ -16,6 +16,7 @@ from src.retrieval.context_builder import build_context_for_query
 from src.supabase_store import (
     find_cached_explorer_output_by_query,
     save_explorer_output_to_supabase,
+    update_explorer_service_log_id,
 )
 from src.validator import validate_explorer_output
 
@@ -115,7 +116,9 @@ class _RagServiceBase:
             client.table("explorer_outputs")
             .select(
                 "id, created_at, backend, model, user_query, "
-                "full_output_json, validation_passed, validation_errors"
+                "full_output_json, validation_passed, validation_errors, "
+                "retrieved_refs, service_log_id, repaired_from_explorer_id, "
+                "repair_instruction"
             )
             .eq("id", explorer_id)
             .limit(1)
@@ -207,6 +210,23 @@ class _RagServiceBase:
                     retrieval_reason=self._one_line(reason),
                 )
             )
+
+        return refs
+
+    def _stored_refs_to_models(self, value: Any) -> list[RetrievedCardRef]:
+        if not isinstance(value, list):
+            return []
+
+        refs: list[RetrievedCardRef] = []
+
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+
+            try:
+                refs.append(RetrievedCardRef.model_validate(item))
+            except Exception:
+                continue
 
         return refs
 
@@ -319,6 +339,10 @@ class RagExplorerService(_RagServiceBase):
                     backend=self.config.backend,
                     model=self.config.model,
                     validation_errors=validation_errors,
+                    retrieved_refs=[
+                        ref.model_dump(mode="json")
+                        for ref in retrieved_refs
+                    ],
                 )
 
                 explorer_row = self._fetch_explorer_output(explorer_id)
@@ -383,6 +407,12 @@ class RagExplorerService(_RagServiceBase):
             },
         )
 
+        update_explorer_service_log_id(
+            explorer_id=str(explorer_row["id"]),
+            service_log_id=str(log_row["log_id"]),
+        )
+        explorer_row["service_log_id"] = str(log_row["log_id"])
+
         return ExplorerDraftResponse(
             explorer=str(explorer_row["id"]),
             explorer_created_at=self._as_optional_str(explorer_row.get("created_at")),
@@ -443,7 +473,9 @@ class RagExplorerService(_RagServiceBase):
             service_log=self._as_optional_str(log_row.get("log_id")),
             service_log_created_at=self._as_optional_str(log_row.get("created_at")),
             assumptions=self._extract_assumptions(output),
-            retrieved_refs=[],
+            retrieved_refs=self._stored_refs_to_models(
+                cached.get("retrieved_refs")
+            ),
             validation=ValidationResult(
                 passed=bool(cached.get("validation_passed")),
                 errors=[str(error) for error in validation_errors],
@@ -531,6 +563,12 @@ class RagExplorerRepairService(_RagServiceBase):
                     backend=f"{self.config.backend}_repair",
                     model=self.config.model,
                     validation_errors=validation_errors,
+                    retrieved_refs=[
+                        ref.model_dump(mode="json")
+                        for ref in retrieved_refs
+                    ],
+                    repaired_from_explorer_id=explorer_id,
+                    repair_instruction=repair_instruction,
                 )
 
                 repaired_row = self._fetch_explorer_output(repaired_id)
@@ -595,6 +633,12 @@ class RagExplorerRepairService(_RagServiceBase):
                 "retrieved_ref_count": len(retrieved_refs),
             },
         )
+
+        update_explorer_service_log_id(
+            explorer_id=str(repaired_row["id"]),
+            service_log_id=str(log_row["log_id"]),
+        )
+        repaired_row["service_log_id"] = str(log_row["log_id"])
 
         return ExplorerDraftResponse(
             explorer=str(repaired_row["id"]),
