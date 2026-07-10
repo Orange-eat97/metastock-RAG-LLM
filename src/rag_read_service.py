@@ -32,7 +32,9 @@ class RagExplorerReadService:
             self.client.table("explorer_outputs")
             .select(
                 "id, created_at, backend, model, user_query, "
-                "full_output_json, validation_passed, validation_errors"
+                "full_output_json, validation_passed, validation_errors, "
+                "retrieved_refs, service_log_id, repaired_from_explorer_id, "
+                "repair_instruction"
             )
             .eq("id", explorer_id)
             .limit(1)
@@ -106,6 +108,12 @@ class RagExplorerReadService:
             flattened["col_definitions"] = col_definitions
         else:
             flattened["col_definitions"] = []
+
+        retrieved_refs = row.get("retrieved_refs")
+        if isinstance(retrieved_refs, list):
+            flattened["retrieved_refs"] = retrieved_refs
+        else:
+            flattened["retrieved_refs"] = []
 
         return flattened
 

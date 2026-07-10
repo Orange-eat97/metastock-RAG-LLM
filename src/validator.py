@@ -343,6 +343,8 @@ def validate_explorer_output(output: dict[str, Any]) -> list[str]:
         ):
             errors.append(f"col {col_letter}: {e}")
 
+    return errors
+
 def extract_ref_calls(formula: str) -> list[str]:
     """
     Return full Ref(...) call bodies, including nested parentheses.

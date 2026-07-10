@@ -33,6 +33,9 @@ def save_explorer_output_to_supabase(
     backend: str,
     model: str,
     validation_errors: list[str] | None = None,
+    retrieved_refs: list[dict[str, Any]] | None = None,
+    repaired_from_explorer_id: str | None = None,
+    repair_instruction: str | None = None,
 ) -> str:
     
     """
@@ -42,6 +45,8 @@ def save_explorer_output_to_supabase(
         explorer_outputs.id
     """
     validation_errors = validation_errors or []
+    retrieved_refs = retrieved_refs or []
+
     explorer_name = str(output.get("explorer_name", "")).strip()
     explorer_description = str(output.get("explorer_description", "")).strip()
     explorer_code_body = str(output.get("explorer_code_body", "")).strip()
@@ -55,6 +60,20 @@ def save_explorer_output_to_supabase(
 
     if not isinstance(col_definitions, list):
         raise ValueError("Cannot save to Supabase: col_definitions must be a list.")
+
+    if not isinstance(retrieved_refs, list):
+        raise ValueError("Cannot save to Supabase: retrieved_refs must be a list.")
+
+    repaired_from_explorer_id = (
+        str(repaired_from_explorer_id).strip()
+        if repaired_from_explorer_id
+        else None
+    )
+    repair_instruction = (
+        str(repair_instruction).strip()
+        if repair_instruction and str(repair_instruction).strip()
+        else None
+    )
 
     validation_passed = len(validation_errors) == 0
 
@@ -72,6 +91,10 @@ def save_explorer_output_to_supabase(
 
         "validation_passed": validation_passed,
         "validation_errors": validation_errors,
+
+        "retrieved_refs": retrieved_refs,
+        "repaired_from_explorer_id": repaired_from_explorer_id,
+        "repair_instruction": repair_instruction,
 
         "status": "generated",
     }
@@ -95,6 +118,38 @@ def save_explorer_output_to_supabase(
         raise RuntimeError(f"Supabase insert did not return id: {inserted}")
 
     return explorer_id
+
+
+def update_explorer_service_log_id(
+    *,
+    explorer_id: str,
+    service_log_id: str,
+) -> None:
+    """Attach the creation/repair RAG log to an existing Explorer row."""
+    cleaned_explorer_id = str(explorer_id or "").strip()
+    cleaned_service_log_id = str(service_log_id or "").strip()
+
+    if not cleaned_explorer_id:
+        raise ValueError("explorer_id is required.")
+
+    if not cleaned_service_log_id:
+        raise ValueError("service_log_id is required.")
+
+    client = _get_supabase_client()
+
+    response = (
+        client
+        .table(TABLE_NAME)
+        .update({"service_log_id": cleaned_service_log_id})
+        .eq("id", cleaned_explorer_id)
+        .execute()
+    )
+
+    if not response.data:
+        raise RuntimeError(
+            "Supabase update did not return an explorer_outputs row for "
+            f"id={cleaned_explorer_id}"
+        )
 
 
 def find_cached_explorer_output_by_query(
@@ -132,7 +187,9 @@ def find_cached_explorer_output_by_query(
         .table(TABLE_NAME)
         .select(
             "id, created_at, backend, model, user_query, "
-            "full_output_json, validation_passed, validation_errors"
+            "full_output_json, validation_passed, validation_errors, "
+            "retrieved_refs, service_log_id, repaired_from_explorer_id, "
+            "repair_instruction"
         )
         .eq("user_query", query)
         .order("created_at", desc=True)
