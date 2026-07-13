@@ -1,13 +1,27 @@
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, Iterator
 
 from dotenv import load_dotenv
 from supabase import Client, create_client
 
 
 load_dotenv()
+
+EXPLORER_NAME_LOOKUP_PAGE_SIZE = 1000
+
+
+class ExplorerNameResolutionError(LookupError):
+    """Base error for exact Explorer-name resolution failures."""
+
+
+class ExplorerNotFoundError(ExplorerNameResolutionError):
+    """Raised when no stored Explorer has the requested exact name."""
+
+
+class ExplorerNameAmbiguousError(ExplorerNameResolutionError):
+    """Raised when multiple stored Explorers have the requested exact name."""
 
 
 class RagExplorerReadService:
@@ -22,8 +36,15 @@ class RagExplorerReadService:
     - no Supabase URL/key returned to callers.
     """
 
-    def __init__(self) -> None:
-        self.client = self._make_supabase_client()
+    def __init__(
+        self,
+        client: Client | None = None,
+    ) -> None:
+        self.client = (
+            client
+            if client is not None
+            else self._make_supabase_client()
+        )
 
     def get_explorer(self, explorer: str) -> dict[str, Any]:
         explorer_id = self._clean_required_text(explorer, "explorer")
@@ -124,3 +145,115 @@ class RagExplorerReadService:
             raise ValueError(f"{field_name} is required.")
 
         return cleaned
+    
+    def resolve_explorer_id_by_name(
+        self,
+        explorer_name: str,
+    ) -> str:
+        """
+        Resolve an exact Explorer name to one explorer_outputs UUID.
+
+        Matching rules:
+        - leading and trailing whitespace are ignored;
+        - matching is case-insensitive;
+        - the complete Explorer name must match;
+        - prefix, substring, fuzzy, and semantic matches are rejected.
+
+        Raises:
+            ExplorerNotFoundError:
+                No exact match exists.
+
+            ExplorerNameAmbiguousError:
+                More than one exact match exists.
+        """
+        cleaned_name = self._clean_required_text(
+            explorer_name,
+            "explorer_name",
+        )
+        normalized_name = cleaned_name.casefold()
+
+        matched_ids: list[str] = []
+
+        for row in self._iter_explorer_identity_rows():
+            full_output = row.get("full_output_json")
+
+            if not isinstance(full_output, dict):
+                continue
+
+            stored_name = str(
+                full_output.get("explorer_name") or ""
+            ).strip()
+
+            if stored_name.casefold() != normalized_name:
+                continue
+
+            explorer_id = str(row.get("id") or "").strip()
+
+            if not explorer_id:
+                raise RuntimeError(
+                    "An explorer_outputs row matched the requested "
+                    "name but did not contain an id."
+                )
+
+            matched_ids.append(explorer_id)
+
+            if len(matched_ids) > 1:
+                raise ExplorerNameAmbiguousError(
+                    "More than one explorer_outputs row has the "
+                    f"exact Explorer name {cleaned_name!r}."
+                )
+
+        if not matched_ids:
+            raise ExplorerNotFoundError(
+                "No explorer_outputs row has the exact Explorer "
+                f"name {cleaned_name!r}."
+            )
+
+        return matched_ids[0]
+    
+    def _iter_explorer_identity_rows(
+        self,
+    ) -> Iterator[dict[str, Any]]:
+        """
+        Read only the fields required for exact-name resolution.
+
+        Explorer names currently live inside full_output_json, so comparison
+        is performed in Python. Explicit pagination avoids silently depending
+        on the PostgREST result limit.
+        """
+        start = 0
+
+        while True:
+            end = (
+                start
+                + EXPLORER_NAME_LOOKUP_PAGE_SIZE
+                - 1
+            )
+
+            response = (
+                self.client.table("explorer_outputs")
+                .select("id, full_output_json")
+                .order("id")
+                .range(start, end)
+                .execute()
+            )
+
+            batch = response.data or []
+
+            if not isinstance(batch, list):
+                raise RuntimeError(
+                    "Supabase returned an invalid "
+                    "explorer_outputs response."
+                )
+
+            for row in batch:
+                if isinstance(row, dict):
+                    yield row
+
+            if (
+                len(batch)
+                < EXPLORER_NAME_LOOKUP_PAGE_SIZE
+            ):
+                return
+
+            start += EXPLORER_NAME_LOOKUP_PAGE_SIZE
