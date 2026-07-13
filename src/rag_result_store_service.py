@@ -16,6 +16,27 @@ SUPPORTED_OUTCOMES = {
     "matches_found",
     "no_matches",
 }
+FULL_RESULT_SELECT = (
+    "id, explorer_id, created_at, "
+    "schema_version, outcome, "
+    "expected_count, matched_count, "
+    "has_matches, clipboard_verified, "
+    "clipboard_verification, rows, "
+    "capture_started_at, "
+    "capture_finished_at, diagnostics"
+)
+
+RESULT_SUMMARY_SELECT = (
+    "id, explorer_id, created_at, "
+    "schema_version, outcome, "
+    "expected_count, matched_count, "
+    "has_matches, clipboard_verified, "
+    "capture_started_at, "
+    "capture_finished_at"
+)
+
+DEFAULT_RESULT_LIST_LIMIT = 20
+MAX_RESULT_LIST_LIMIT = 100
 
 
 class RagExplorerResultStoreService:
@@ -214,6 +235,320 @@ class RagExplorerResultStoreService:
             ),
             "created_at": self._optional_text(
                 stored.get("created_at")
+            ),
+        }
+    
+    def get_result(
+        self,
+        result_id: str,
+    ) -> dict[str, Any]:
+        """
+        Return one complete stored result artifact.
+        """
+        cleaned_result_id = self._required_text(
+            result_id,
+            "result_id",
+        )
+
+        response = (
+            self.client.table(TABLE_NAME)
+            .select(FULL_RESULT_SELECT)
+            .eq("id", cleaned_result_id)
+            .limit(1)
+            .execute()
+        )
+
+        if not response.data:
+            raise ValueError(
+                "No explorer_result_sets row found "
+                f"for id={cleaned_result_id}"
+            )
+
+        return self._normalize_stored_result(
+            response.data[0]
+        )
+
+
+    def get_latest_result(
+        self,
+        explorer_id: str,
+    ) -> dict[str, Any] | None:
+        """
+        Return the newest complete result for an Explorer.
+
+        None means that the Explorer has no stored results.
+        """
+        cleaned_explorer_id = self._required_text(
+            explorer_id,
+            "explorer_id",
+        )
+
+        response = (
+            self.client.table(TABLE_NAME)
+            .select(FULL_RESULT_SELECT)
+            .eq(
+                "explorer_id",
+                cleaned_explorer_id,
+            )
+            .order(
+                "created_at",
+                desc=True,
+            )
+            .limit(1)
+            .execute()
+        )
+
+        if not response.data:
+            return None
+
+        return self._normalize_stored_result(
+            response.data[0]
+        )
+
+
+    def list_results(
+        self,
+        explorer_id: str,
+        *,
+        limit: int = DEFAULT_RESULT_LIST_LIMIT,
+    ) -> list[dict[str, Any]]:
+        """
+        Return newest-first summaries for an Explorer.
+
+        Full rows and diagnostics are excluded. Call get_result()
+        when the complete result artifact is needed.
+        """
+        cleaned_explorer_id = self._required_text(
+            explorer_id,
+            "explorer_id",
+        )
+        cleaned_limit = int(limit)
+
+        if cleaned_limit <= 0:
+            raise ValueError(
+                "limit must be greater than zero."
+            )
+
+        if cleaned_limit > MAX_RESULT_LIST_LIMIT:
+            raise ValueError(
+                "limit cannot exceed "
+                f"{MAX_RESULT_LIST_LIMIT}."
+            )
+
+        response = (
+            self.client.table(TABLE_NAME)
+            .select(RESULT_SUMMARY_SELECT)
+            .eq(
+                "explorer_id",
+                cleaned_explorer_id,
+            )
+            .order(
+                "created_at",
+                desc=True,
+            )
+            .limit(cleaned_limit)
+            .execute()
+        )
+
+        return [
+            self._normalize_result_summary(row)
+            for row in (response.data or [])
+        ]
+
+
+    def _normalize_stored_result(
+        self,
+        row: Any,
+    ) -> dict[str, Any]:
+        """
+        Convert one database row into the stable full-result contract.
+        """
+        if not isinstance(row, dict):
+            raise RuntimeError(
+                "Stored result row must be a dictionary."
+            )
+
+        schema_version = self._required_text(
+            row.get("schema_version"),
+            "stored schema_version",
+        )
+
+        if schema_version != SUPPORTED_SCHEMA_VERSION:
+            raise RuntimeError(
+                "Stored result uses unsupported schema "
+                f"version {schema_version!r}."
+            )
+
+        outcome = self._required_text(
+            row.get("outcome"),
+            "stored outcome",
+        )
+
+        if outcome not in SUPPORTED_OUTCOMES:
+            raise RuntimeError(
+                "Stored result uses unsupported outcome "
+                f"{outcome!r}."
+            )
+
+        raw_rows = row.get("rows") or []
+
+        if not isinstance(raw_rows, list):
+            raise RuntimeError(
+                "Stored result rows must be a list."
+            )
+
+        normalized_rows = [
+            self._normalize_row(item)
+            for item in raw_rows
+        ]
+
+        raw_verification = row.get(
+            "clipboard_verification"
+        )
+
+        clipboard_verification = (
+            self._normalize_verification(
+                raw_verification
+            )
+            if raw_verification is not None
+            else None
+        )
+
+        diagnostics = row.get("diagnostics") or {}
+
+        if not isinstance(diagnostics, dict):
+            raise RuntimeError(
+                "Stored result diagnostics must be "
+                "a dictionary."
+            )
+
+        raw_clipboard_verified = row.get(
+            "clipboard_verified"
+        )
+
+        clipboard_verified = (
+            None
+            if raw_clipboard_verified is None
+            else bool(raw_clipboard_verified)
+        )
+
+        return {
+            "result_id": self._required_text(
+                row.get("id"),
+                "stored result id",
+            ),
+            "explorer_id": self._required_text(
+                row.get("explorer_id"),
+                "stored explorer id",
+            ),
+            "created_at": self._optional_text(
+                row.get("created_at")
+            ),
+            "schema_version": schema_version,
+            "outcome": outcome,
+            "expected_count": int(
+                row.get("expected_count", 0)
+            ),
+            "matched_count": int(
+                row.get("matched_count", 0)
+            ),
+            "has_matches": bool(
+                row.get("has_matches", False)
+            ),
+            "clipboard_verified": (
+                clipboard_verified
+            ),
+            "clipboard_verification": (
+                clipboard_verification
+            ),
+            "rows": normalized_rows,
+            "capture_started_at": (
+                self._optional_text(
+                    row.get("capture_started_at")
+                )
+            ),
+            "capture_finished_at": (
+                self._optional_text(
+                    row.get("capture_finished_at")
+                )
+            ),
+            "diagnostics": dict(diagnostics),
+        }
+
+
+    def _normalize_result_summary(
+        self,
+        row: Any,
+    ) -> dict[str, Any]:
+        """
+        Convert one database row into the bounded list contract.
+        """
+        if not isinstance(row, dict):
+            raise RuntimeError(
+                "Stored result summary must be a dictionary."
+            )
+
+        schema_version = self._required_text(
+            row.get("schema_version"),
+            "stored schema_version",
+        )
+
+        if schema_version != SUPPORTED_SCHEMA_VERSION:
+            raise RuntimeError(
+                "Stored result summary uses unsupported "
+                f"schema version {schema_version!r}."
+            )
+
+        outcome = self._required_text(
+            row.get("outcome"),
+            "stored outcome",
+        )
+
+        if outcome not in SUPPORTED_OUTCOMES:
+            raise RuntimeError(
+                "Stored result summary uses unsupported "
+                f"outcome {outcome!r}."
+            )
+
+        return {
+            "result_id": self._required_text(
+                row.get("id"),
+                "stored result id",
+            ),
+            "explorer_id": self._required_text(
+                row.get("explorer_id"),
+                "stored explorer id",
+            ),
+            "created_at": self._optional_text(
+                row.get("created_at")
+            ),
+            "schema_version": schema_version,
+            "outcome": outcome,
+            "expected_count": int(
+                row.get("expected_count", 0)
+            ),
+            "matched_count": int(
+                row.get("matched_count", 0)
+            ),
+            "has_matches": bool(
+                row.get("has_matches", False)
+            ),
+            "clipboard_verified": (
+                None
+                if row.get("clipboard_verified") is None
+                else bool(
+                    row.get("clipboard_verified")
+                )
+            ),
+            "capture_started_at": (
+                self._optional_text(
+                    row.get("capture_started_at")
+                )
+            ),
+            "capture_finished_at": (
+                self._optional_text(
+                    row.get("capture_finished_at")
+                )
             ),
         }
 
