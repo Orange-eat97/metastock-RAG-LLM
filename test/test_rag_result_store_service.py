@@ -1,12 +1,5 @@
 from __future__ import annotations
 
-import sys
-import types
-
-fake_supabase = types.ModuleType("supabase")
-fake_supabase.create_client = lambda url, key: None
-sys.modules["supabase"] = fake_supabase
-
 from src.rag_result_store_service import (
     RagExplorerResultStoreService,
 )

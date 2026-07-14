@@ -50,7 +50,12 @@ class ColDefinition(BaseModel):
 
 class ExplorerOutput(BaseModel):
     explorer_name: str = Field(
-        description="Short readable explorer name suitable for MetaStock. This maps to explorer_body.explorer_name."
+        description=(
+            "Short readable AI-managed Explorer name suitable for MetaStock. "
+            "For an initial generation, prefix the otherwise generated name "
+            "with the literal string AI_ and do not add a version suffix. "
+            "This maps to explorer_body.explorer_name."
+        )
     )
     explorer_description: str = Field(
         description="Optional explanation for the Explorer. This maps to explorer_body.explorer_description."
@@ -83,6 +88,16 @@ Generation priorities:
 8. Use AND and OR, not && or ||.
 9. Use = for equality, not ==.
 10. If the user omits a common default, state the assumption by reflecting it in the description.
+
+Explorer naming rules:
+- Every newly generated Explorer is AI-managed.
+- explorer_name must begin with the exact prefix `AI_`.
+- After `AI_`, keep the concise descriptive Explorer name that you would
+  otherwise generate.
+- For an initial generation, do not append a version number.
+- Initial-name format: `AI_<generated explorer name>`.
+- Do not add `AI_` more than once.
+- Keep the name concise enough for practical MetaStock searching.
 
 Output must be valid JSON matching this exact schema:
 
@@ -127,7 +142,7 @@ Pattern card usage rules:
 
 Good output example:
 {{
-  "explorer_name": "RSI Below 30",
+  "explorer_name": "AI_RSI Below 30",
   "explorer_description": "Finds stocks where RSI is below 30, indicating potential oversold conditions.",
   "explorer_code_body": "RSI(14) < 30",
   "col_definitions": [

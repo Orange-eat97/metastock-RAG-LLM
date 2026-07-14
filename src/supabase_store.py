@@ -36,6 +36,8 @@ def save_explorer_output_to_supabase(
     retrieved_refs: list[dict[str, Any]] | None = None,
     repaired_from_explorer_id: str | None = None,
     repair_instruction: str | None = None,
+    revised_from_explorer_id: str | None = None,
+    revision_instruction: str | None = None,
 ) -> str:
     
     """
@@ -74,6 +76,22 @@ def save_explorer_output_to_supabase(
         if repair_instruction and str(repair_instruction).strip()
         else None
     )
+    revised_from_explorer_id = (
+        str(revised_from_explorer_id).strip()
+        if revised_from_explorer_id
+        else None
+    )
+    revision_instruction = (
+        str(revision_instruction).strip()
+        if revision_instruction
+        and str(revision_instruction).strip()
+        else None
+    )
+
+    if bool(repaired_from_explorer_id) and bool(revised_from_explorer_id):
+        raise ValueError(
+            "An Explorer row cannot be both a repair and a revision."
+        )
 
     validation_passed = len(validation_errors) == 0
 
@@ -95,6 +113,8 @@ def save_explorer_output_to_supabase(
         "retrieved_refs": retrieved_refs,
         "repaired_from_explorer_id": repaired_from_explorer_id,
         "repair_instruction": repair_instruction,
+        "revised_from_explorer_id": revised_from_explorer_id,
+        "revision_instruction": revision_instruction,
 
         "status": "generated",
     }
@@ -189,7 +209,8 @@ def find_cached_explorer_output_by_query(
             "id, created_at, backend, model, user_query, "
             "full_output_json, validation_passed, validation_errors, "
             "retrieved_refs, service_log_id, repaired_from_explorer_id, "
-            "repair_instruction"
+            "repair_instruction, revised_from_explorer_id, "
+            "revision_instruction"
         )
         .eq("user_query", query)
         .order("created_at", desc=True)

@@ -55,7 +55,8 @@ class RagExplorerReadService:
                 "id, created_at, backend, model, user_query, "
                 "full_output_json, validation_passed, validation_errors, "
                 "retrieved_refs, service_log_id, repaired_from_explorer_id, "
-                "repair_instruction"
+                "repair_instruction, revised_from_explorer_id, "
+                "revision_instruction"
             )
             .eq("id", explorer_id)
             .limit(1)
