@@ -12,13 +12,19 @@ from pydantic import BaseModel, Field
 from supabase import Client, create_client
 
 from src.generate_explorer import MODEL, build_prompt, generate_with_openai
+from src.query_duplicate_guard import (
+    DuplicateExplorerMatch,
+    ExplorerQueryDuplicateGuard,
+)
+from src.query_identity import build_query_identity
 from src.retrieval.context_builder import build_context_for_query
 from src.supabase_store import (
-    find_cached_explorer_output_by_query,
     save_explorer_output_to_supabase,
     update_explorer_service_log_id,
 )
+
 from src.validator import validate_explorer_output
+
 
 
 load_dotenv()
@@ -89,9 +95,26 @@ class RagServiceConfig(BaseModel):
     backend: str = "openai"
     model: str = MODEL
 
-    # Exact-query cache is safe by default because supabase_store only reuses
-    # rows where user_query matches exactly.
     use_cache: bool = True
+    use_semantic_cache: bool = True
+
+    query_embedding_model: str = (
+        "text-embedding-3-small"
+    )
+
+    query_equivalence_model: str = MODEL
+
+    semantic_cache_min_similarity: (
+        float
+    ) = 0.75
+
+    semantic_cache_min_confidence: (
+        float
+    ) = 0.97
+
+    semantic_cache_max_candidates: (
+        int
+    ) = 5
 
     top_k: int = 12
     max_dynamic_files: int = 5
@@ -296,19 +319,58 @@ class RagExplorerService(_RagServiceBase):
         user_message: str,
         conversation_id: str | None = None,
     ) -> ExplorerDraftResponse:
-        user_query = self._clean_required_text(user_message, "user_message")
+        user_query = self._clean_required_text(
+            user_message,
+            "user_message",
+        )
+
+        # Always create at least the normalized/hash identity. If semantic cache
+        # checking succeeds, cache_check.identity will also contain the embedding.
+        query_identity = build_query_identity(
+            user_query,
+            include_embedding=False,
+        )
+
+        semantic_cache_error: str | None = None
 
         if self.config.use_cache:
-            cached = find_cached_explorer_output_by_query(
-                user_query=user_query,
-                require_validation_passed=True,
-                model=self.config.model,
+            duplicate_guard = ExplorerQueryDuplicateGuard(
+                embedding_model=(
+                    self.config.query_embedding_model
+                ),
+                equivalence_model=(
+                    self.config.query_equivalence_model
+                ),
+                min_similarity=(
+                    self.config.semantic_cache_min_similarity
+                ),
+                min_equivalence_confidence=(
+                    self.config.semantic_cache_min_confidence
+                ),
+                max_candidates=(
+                    self.config.semantic_cache_max_candidates
+                ),
             )
-            if cached is not None:
+
+            cache_check = duplicate_guard.check(
+                user_query=user_query,
+                generation_model=self.config.model,
+                semantic_enabled=(
+                    self.config.use_semantic_cache
+                ),
+            )
+
+            query_identity = cache_check.identity
+            semantic_cache_error = (
+                cache_check.semantic_error
+            )
+
+            if cache_check.match is not None:
                 return self._response_from_cache(
-                    cached,
+                    cache_check.match.row,
                     user_query=user_query,
                     conversation_id=conversation_id,
+                    cache_match=cache_check.match,
                 )
 
         stdout_buffer = io.StringIO()
@@ -320,43 +382,99 @@ class RagExplorerService(_RagServiceBase):
         validation_errors: list[str] = []
 
         try:
-            with redirect_stdout(stdout_buffer), redirect_stderr(stderr_buffer):
-                print("[rag_service] Starting Explorer generation")
-                print(f"[rag_service] model={self.config.model}")
-                print(f"[rag_service] backend={self.config.backend}")
-                print(f"[rag_service] use_cache={self.config.use_cache}")
-
-                context, dynamic_items = build_context_for_query(
-                    query=user_query,
-                    top_k=self.config.top_k,
-                    max_dynamic_files=self.config.max_dynamic_files,
-                    use_tiered_dynamic=self.config.use_tiered_dynamic,
+            with (
+                redirect_stdout(stdout_buffer),
+                redirect_stderr(stderr_buffer),
+            ):
+                print(
+                    "[rag_service] Starting Explorer generation"
+                )
+                print(
+                    f"[rag_service] model={self.config.model}"
+                )
+                print(
+                    f"[rag_service] backend={self.config.backend}"
+                )
+                print(
+                    "[rag_service] "
+                    f"use_cache={self.config.use_cache}"
+                )
+                print(
+                    "[rag_service] "
+                    "use_semantic_cache="
+                    f"{self.config.use_semantic_cache}"
                 )
 
-                retrieved_refs = self._dynamic_items_to_refs(dynamic_items)
+                if semantic_cache_error:
+                    print(
+                        "[rag_service] Semantic cache check "
+                        "failed open: "
+                        f"{semantic_cache_error}"
+                    )
 
-                prompt = build_prompt(user_query=user_query, context=context)
-                generated_output = generate_with_openai(prompt)
-                validation_errors = validate_explorer_output(generated_output)
+                context, dynamic_items = (
+                    build_context_for_query(
+                        query=user_query,
+                        top_k=self.config.top_k,
+                        max_dynamic_files=(
+                            self.config.max_dynamic_files
+                        ),
+                        use_tiered_dynamic=(
+                            self.config.use_tiered_dynamic
+                        ),
+                    )
+                )
 
-                explorer_id = save_explorer_output_to_supabase(
-                    output=generated_output,
+                retrieved_refs = (
+                    self._dynamic_items_to_refs(
+                        dynamic_items
+                    )
+                )
+
+                prompt = build_prompt(
                     user_query=user_query,
-                    backend=self.config.backend,
-                    model=self.config.model,
-                    validation_errors=validation_errors,
-                    retrieved_refs=[
-                        ref.model_dump(mode="json")
-                        for ref in retrieved_refs
-                    ],
+                    context=context,
                 )
 
-                explorer_row = self._fetch_explorer_output(explorer_id)
+                generated_output = generate_with_openai(
+                    prompt
+                )
+
+                validation_errors = (
+                    validate_explorer_output(
+                        generated_output
+                    )
+                )
+
+                explorer_id = (
+                    save_explorer_output_to_supabase(
+                        output=generated_output,
+                        user_query=user_query,
+                        backend=self.config.backend,
+                        model=self.config.model,
+                        validation_errors=(
+                            validation_errors
+                        ),
+                        retrieved_refs=[
+                            ref.model_dump(mode="json")
+                            for ref in retrieved_refs
+                        ],
+                        query_identity=query_identity,
+                    )
+                )
+
+                explorer_row = (
+                    self._fetch_explorer_output(
+                        explorer_id
+                    )
+                )
 
                 print(
-                    "[rag_service] Saved explorer_outputs row "
+                    "[rag_service] Saved "
+                    "explorer_outputs row "
                     f"id={explorer_row.get('id')} "
-                    f"created_at={explorer_row.get('created_at')}"
+                    f"created_at="
+                    f"{explorer_row.get('created_at')}"
                 )
                 print(
                     "[rag_service] validation_passed="
@@ -369,15 +487,24 @@ class RagExplorerService(_RagServiceBase):
 
             try:
                 self._save_rag_service_log(
-                    event_type="rag_service.generate.error",
+                    event_type=(
+                        "rag_service.generate.error"
+                    ),
                     user_query=user_query,
                     stdout_text=stdout_text,
                     stderr_text=stderr_text,
                     metadata={
-                        "conversation_id": conversation_id,
+                        "conversation_id": (
+                            conversation_id
+                        ),
                         "model": self.config.model,
                         "backend": self.config.backend,
-                        "error_type": type(exc).__name__,
+                        "semantic_cache_error": (
+                            semantic_cache_error
+                        ),
+                        "error_type": (
+                            type(exc).__name__
+                        ),
                         "error_message": str(exc),
                     },
                 )
@@ -387,8 +514,14 @@ class RagExplorerService(_RagServiceBase):
 
             raise
 
-        if generated_output is None or explorer_row is None:
-            raise RuntimeError("Generation completed without explorer output/row.")
+        if (
+            generated_output is None
+            or explorer_row is None
+        ):
+            raise RuntimeError(
+                "Generation completed without "
+                "explorer output/row."
+            )
 
         stdout_text = stdout_buffer.getvalue()
         stderr_text = stderr_buffer.getvalue()
@@ -396,9 +529,15 @@ class RagExplorerService(_RagServiceBase):
         log_row = self._save_rag_service_log(
             event_type="rag_service.generate",
             user_query=user_query,
-            explorer_output_id=self._as_optional_str(explorer_row.get("id")),
-            explorer_output_created_at=self._as_optional_str(
-                explorer_row.get("created_at")
+            explorer_output_id=(
+                self._as_optional_str(
+                    explorer_row.get("id")
+                )
+            ),
+            explorer_output_created_at=(
+                self._as_optional_str(
+                    explorer_row.get("created_at")
+                )
             ),
             stdout_text=stdout_text,
             stderr_text=stderr_text,
@@ -406,10 +545,25 @@ class RagExplorerService(_RagServiceBase):
                 "conversation_id": conversation_id,
                 "model": self.config.model,
                 "backend": self.config.backend,
-                "validation_passed": len(validation_errors) == 0,
-                "validation_error_count": len(validation_errors),
-                "retrieved_ref_count": len(retrieved_refs),
+                "validation_passed": (
+                    len(validation_errors) == 0
+                ),
+                "validation_error_count": (
+                    len(validation_errors)
+                ),
+                "retrieved_ref_count": (
+                    len(retrieved_refs)
+                ),
                 "uses_generate_explorer_module": True,
+                "semantic_cache_error": (
+                    semantic_cache_error
+                ),
+                "query_embedding_stored": (
+                    query_identity.embedding is not None
+                ),
+                "query_embedding_model": (
+                    query_identity.embedding_model
+                ),
             },
         )
 
@@ -417,76 +571,211 @@ class RagExplorerService(_RagServiceBase):
             explorer_id=str(explorer_row["id"]),
             service_log_id=str(log_row["log_id"]),
         )
-        explorer_row["service_log_id"] = str(log_row["log_id"])
+
+        explorer_row["service_log_id"] = str(
+            log_row["log_id"]
+        )
 
         return ExplorerDraftResponse(
             explorer=str(explorer_row["id"]),
-            explorer_created_at=self._as_optional_str(explorer_row.get("created_at")),
-            service_log=self._as_optional_str(log_row.get("log_id")),
-            service_log_created_at=self._as_optional_str(log_row.get("created_at")),
-            assumptions=self._extract_assumptions(generated_output),
+            explorer_created_at=(
+                self._as_optional_str(
+                    explorer_row.get("created_at")
+                )
+            ),
+            service_log=(
+                self._as_optional_str(
+                    log_row.get("log_id")
+                )
+            ),
+            service_log_created_at=(
+                self._as_optional_str(
+                    log_row.get("created_at")
+                )
+            ),
+            assumptions=(
+                self._extract_assumptions(
+                    generated_output
+                )
+            ),
             retrieved_refs=retrieved_refs,
             validation=ValidationResult(
-                passed=len(validation_errors) == 0,
+                passed=(
+                    len(validation_errors) == 0
+                ),
                 errors=validation_errors,
             ),
             model=self.config.model,
             source="generated",
         )
 
+   
     def _response_from_cache(
         self,
         cached: dict[str, Any],
         *,
         user_query: str,
         conversation_id: str | None,
+        cache_match: DuplicateExplorerMatch | None = None,
     ) -> ExplorerDraftResponse:
         output = cached.get("full_output_json")
 
         if not isinstance(output, dict):
             raise ValueError(
-                f"Cached row {cached.get('id')} has invalid full_output_json."
+                "Cached row "
+                f"{cached.get('id')} has invalid "
+                "full_output_json."
             )
 
-        validation_errors = cached.get("validation_errors") or []
+        validation_errors = (
+            cached.get("validation_errors")
+            or []
+        )
+
         if not isinstance(validation_errors, list):
-            validation_errors = [str(validation_errors)]
+            validation_errors = [
+                str(validation_errors)
+            ]
+
+        match_type = str(
+            (
+                cache_match.match_type
+                if cache_match is not None
+                else cached.get(
+                    "_cache_match_type"
+                )
+            )
+            or "cache"
+        )
+
+        matched_query = (
+            cached.get("_cache_matched_query")
+            or cached.get("user_query")
+        )
+
+        similarity = (
+            cache_match.similarity
+            if cache_match is not None
+            else cached.get(
+                "_cache_similarity"
+            )
+        )
+
+        equivalence_confidence = (
+            cache_match.equivalence_confidence
+            if cache_match is not None
+            else cached.get(
+                "_cache_equivalence_confidence"
+            )
+        )
+
+        equivalence_reason = (
+            cache_match.equivalence_reason
+            if cache_match is not None
+            else cached.get(
+                "_cache_equivalence_reason"
+            )
+        )
 
         stdout_text = (
-            "[rag_service] Exact-query cache hit.\n"
-            f"[rag_service] Reusing explorer_outputs row "
-            f"id={cached.get('id')} created_at={cached.get('created_at')}\n"
+            "[rag_service] Query cache hit.\n"
+            "[rag_service] "
+            f"match_type={match_type}\n"
+            "[rag_service] Reusing "
+            "explorer_outputs row "
+            f"id={cached.get('id')} "
+            f"created_at={cached.get('created_at')}\n"
         )
 
         log_row = self._save_rag_service_log(
-            event_type="rag_service.generate.cache_hit",
+            event_type=(
+                "rag_service.generate.cache_hit"
+            ),
             user_query=user_query,
-            explorer_output_id=self._as_optional_str(cached.get("id")),
-            explorer_output_created_at=self._as_optional_str(cached.get("created_at")),
+            explorer_output_id=(
+                self._as_optional_str(
+                    cached.get("id")
+                )
+            ),
+            explorer_output_created_at=(
+                self._as_optional_str(
+                    cached.get("created_at")
+                )
+            ),
             stdout_text=stdout_text,
             stderr_text="",
             metadata={
-                "conversation_id": conversation_id,
-                "model": str(cached.get("model") or self.config.model),
-                "backend": str(cached.get("backend") or self.config.backend),
-                "validation_passed": bool(cached.get("validation_passed")),
+                "conversation_id": (
+                    conversation_id
+                ),
+                "model": str(
+                    cached.get("model")
+                    or self.config.model
+                ),
+                "backend": str(
+                    cached.get("backend")
+                    or self.config.backend
+                ),
+                "validation_passed": bool(
+                    cached.get(
+                        "validation_passed"
+                    )
+                ),
+                "cache_match_type": match_type,
+                "matched_query": matched_query,
+                "similarity": similarity,
+                "equivalence_confidence": (
+                    equivalence_confidence
+                ),
+                "equivalence_reason": (
+                    equivalence_reason
+                ),
             },
         )
 
         return ExplorerDraftResponse(
             explorer=str(cached.get("id")),
-            explorer_created_at=self._as_optional_str(cached.get("created_at")),
-            service_log=self._as_optional_str(log_row.get("log_id")),
-            service_log_created_at=self._as_optional_str(log_row.get("created_at")),
-            assumptions=self._extract_assumptions(output),
-            retrieved_refs=self._stored_refs_to_models(
-                cached.get("retrieved_refs")
+            explorer_created_at=(
+                self._as_optional_str(
+                    cached.get("created_at")
+                )
+            ),
+            service_log=(
+                self._as_optional_str(
+                    log_row.get("log_id")
+                )
+            ),
+            service_log_created_at=(
+                self._as_optional_str(
+                    log_row.get("created_at")
+                )
+            ),
+            assumptions=(
+                self._extract_assumptions(
+                    output
+                )
+            ),
+            retrieved_refs=(
+                self._stored_refs_to_models(
+                    cached.get("retrieved_refs")
+                )
             ),
             validation=ValidationResult(
-                passed=bool(cached.get("validation_passed")),
-                errors=[str(error) for error in validation_errors],
+                passed=bool(
+                    cached.get(
+                        "validation_passed"
+                    )
+                ),
+                errors=[
+                    str(error)
+                    for error
+                    in validation_errors
+                ],
             ),
-            model=str(cached.get("model") or self.config.model),
+            model=str(
+                cached.get("model")
+                or self.config.model
+            ),
             source="cache",
         )
 
@@ -557,24 +846,74 @@ class RagExplorerRepairService(_RagServiceBase):
                 repaired_output = generate_with_openai(prompt)
                 validation_errors = validate_explorer_output(repaired_output)
 
-                repair_query = self._build_repair_user_query(
-                    original_explorer_id=explorer_id,
-                    original_query=original_query,
-                    repair_instruction=repair_instruction,
+                repair_query = (
+                    self._build_repair_user_query(
+                        original_explorer_id=explorer_id,
+                        original_query=original_query,
+                        repair_instruction=(
+                            repair_instruction
+                        ),
+                    )
                 )
 
-                repaired_id = save_explorer_output_to_supabase(
-                    output=repaired_output,
-                    user_query=repair_query,
-                    backend=f"{self.config.backend}_repair",
-                    model=self.config.model,
-                    validation_errors=validation_errors,
-                    retrieved_refs=[
-                        ref.model_dump(mode="json")
-                        for ref in retrieved_refs
-                    ],
-                    repaired_from_explorer_id=explorer_id,
-                    repair_instruction=repair_instruction,
+                # The persisted user_query keeps repair lineage, but the cache identity points
+                # to the original strategy request. This allows a valid repaired Explorer to
+                # replace the invalid original as the preferred cache result.
+                try:
+                    repair_query_identity = (
+                        build_query_identity(
+                            original_query,
+                            include_embedding=(
+                                self.config.use_semantic_cache
+                            ),
+                            embedding_model=(
+                                self.config
+                                .query_embedding_model
+                            ),
+                        )
+                    )
+                except Exception as identity_exc:
+                    # Embedding is a cache optimization. Failure to create it must not prevent
+                    # the actual Explorer repair from completing.
+                    print(
+                        "[rag_service] Repair query "
+                        "embedding failed open: "
+                        f"{type(identity_exc).__name__}: "
+                        f"{identity_exc}"
+                    )
+
+                    repair_query_identity = (
+                        build_query_identity(
+                            original_query,
+                            include_embedding=False,
+                        )
+                    )
+
+                repaired_id = (
+                    save_explorer_output_to_supabase(
+                        output=repaired_output,
+                        user_query=repair_query,
+                        backend=(
+                            f"{self.config.backend}_repair"
+                        ),
+                        model=self.config.model,
+                        validation_errors=(
+                            validation_errors
+                        ),
+                        retrieved_refs=[
+                            ref.model_dump(mode="json")
+                            for ref in retrieved_refs
+                        ],
+                        repaired_from_explorer_id=(
+                            explorer_id
+                        ),
+                        repair_instruction=(
+                            repair_instruction
+                        ),
+                        query_identity=(
+                            repair_query_identity
+                        ),
+                    )
                 )
 
                 repaired_row = self._fetch_explorer_output(repaired_id)

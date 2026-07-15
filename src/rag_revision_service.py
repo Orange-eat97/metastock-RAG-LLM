@@ -6,6 +6,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from typing import Any
 
 from src.generate_explorer import generate_with_openai
+from src.query_identity import build_query_identity
 from src.rag_service import (
     ExplorerDraftResponse,
     RetrievedCardRef,
@@ -28,6 +29,11 @@ class RagExplorerRevisionService(_RagServiceBase):
 
     Revision is separate from repair. It intentionally changes strategy logic
     or parameters, stores a new Explorer row, and never mutates the original.
+
+    Revised rows receive normalized query identity fields for traceability, but
+    they do not receive semantic-cache embeddings. A revision represents
+    deliberately changed strategy logic and must not be reused as a semantic
+    duplicate of the original request.
     """
 
     def revise_explorer(
@@ -44,6 +50,7 @@ class RagExplorerRevisionService(_RagServiceBase):
             revision_instruction,
             "revision_instruction",
         )
+
         existing = self._fetch_explorer_output(
             explorer_id
         )
@@ -70,8 +77,10 @@ class RagExplorerRevisionService(_RagServiceBase):
             f"{original_query}\n"
             f"Revision instruction: {instruction}"
         )
+
         stdout_buffer = io.StringIO()
         stderr_buffer = io.StringIO()
+
         revised_output: dict[str, Any] | None = None
         revised_row: dict[str, Any] | None = None
         retrieved_refs: list[RetrievedCardRef] = []
@@ -94,6 +103,10 @@ class RagExplorerRevisionService(_RagServiceBase):
                     "[rag_revision_service] "
                     f"model={self.config.model}"
                 )
+                print(
+                    "[rag_revision_service] "
+                    f"backend={self.config.backend}"
+                )
 
                 context, dynamic_items = (
                     build_context_for_query(
@@ -107,17 +120,20 @@ class RagExplorerRevisionService(_RagServiceBase):
                         ),
                     )
                 )
+
                 retrieved_refs = (
                     self._dynamic_items_to_refs(
                         dynamic_items
                     )
                 )
+
                 prompt = self._build_revision_prompt(
                     original_query=original_query,
                     context=context,
                     existing_explorer=existing_output,
                     revision_instruction=instruction,
                 )
+
                 revised_output = generate_with_openai(
                     prompt
                 )
@@ -133,6 +149,7 @@ class RagExplorerRevisionService(_RagServiceBase):
                         revised_output
                     )
                 )
+
                 revision_query = (
                     self._build_revision_user_query(
                         original_explorer_id=explorer_id,
@@ -140,6 +157,18 @@ class RagExplorerRevisionService(_RagServiceBase):
                         revision_instruction=instruction,
                     )
                 )
+
+                # Revisions intentionally change strategy meaning. Store the
+                # normalized query and hash for traceability, but do not create
+                # an embedding that could make the revision eligible for
+                # semantic duplicate matching.
+                revision_query_identity = (
+                    build_query_identity(
+                        revision_query,
+                        include_embedding=False,
+                    )
+                )
+
                 revised_id = (
                     save_explorer_output_to_supabase(
                         output=revised_output,
@@ -148,7 +177,9 @@ class RagExplorerRevisionService(_RagServiceBase):
                             f"{self.config.backend}_revision"
                         ),
                         model=self.config.model,
-                        validation_errors=validation_errors,
+                        validation_errors=(
+                            validation_errors
+                        ),
                         retrieved_refs=[
                             ref.model_dump(mode="json")
                             for ref in retrieved_refs
@@ -157,17 +188,31 @@ class RagExplorerRevisionService(_RagServiceBase):
                             explorer_id
                         ),
                         revision_instruction=instruction,
+                        query_identity=(
+                            revision_query_identity
+                        ),
                     )
                 )
+
                 revised_row = (
                     self._fetch_explorer_output(
                         revised_id
                     )
                 )
+
                 print(
                     "[rag_revision_service] Saved "
                     "revised explorer_outputs row "
                     f"id={revised_id}"
+                )
+                print(
+                    "[rag_revision_service] "
+                    "validation_passed="
+                    f"{len(validation_errors) == 0}"
+                )
+                print(
+                    "[rag_revision_service] "
+                    "semantic_cache_embedding_stored=False"
                 )
 
         except Exception as exc:
@@ -183,24 +228,40 @@ class RagExplorerRevisionService(_RagServiceBase):
                             existing.get("created_at")
                         )
                     ),
-                    stdout_text=stdout_buffer.getvalue(),
-                    stderr_text=stderr_buffer.getvalue(),
+                    stdout_text=(
+                        stdout_buffer.getvalue()
+                    ),
+                    stderr_text=(
+                        stderr_buffer.getvalue()
+                    ),
                     metadata={
-                        "conversation_id": conversation_id,
+                        "conversation_id": (
+                            conversation_id
+                        ),
                         "revision_of": explorer_id,
-                        "revision_instruction": instruction,
+                        "revision_instruction": (
+                            instruction
+                        ),
                         "model": self.config.model,
                         "backend": self.config.backend,
-                        "error_type": type(exc).__name__,
+                        "semantic_cache_eligible": False,
+                        "error_type": (
+                            type(exc).__name__
+                        ),
                         "error_message": str(exc),
                     },
                 )
             except Exception:
+                # Preserve the original revision error if service-log storage
+                # also fails.
                 pass
 
             raise
 
-        if revised_output is None or revised_row is None:
+        if (
+            revised_output is None
+            or revised_row is None
+        ):
             raise RuntimeError(
                 "Revision completed without a "
                 "revised output row."
@@ -219,8 +280,12 @@ class RagExplorerRevisionService(_RagServiceBase):
                     revised_row.get("created_at")
                 )
             ),
-            stdout_text=stdout_buffer.getvalue(),
-            stderr_text=stderr_buffer.getvalue(),
+            stdout_text=(
+                stdout_buffer.getvalue()
+            ),
+            stderr_text=(
+                stderr_buffer.getvalue()
+            ),
             metadata={
                 "conversation_id": conversation_id,
                 "revision_of": explorer_id,
@@ -233,22 +298,37 @@ class RagExplorerRevisionService(_RagServiceBase):
                 "validation_error_count": (
                     len(validation_errors)
                 ),
-                "retrieved_ref_count": len(retrieved_refs),
+                "retrieved_ref_count": (
+                    len(retrieved_refs)
+                ),
+                "semantic_cache_eligible": False,
+                "query_identity_stored": True,
+                "query_embedding_stored": False,
             },
         )
+
         update_explorer_service_log_id(
-            explorer_id=str(revised_row["id"]),
-            service_log_id=str(log_row["log_id"]),
+            explorer_id=str(
+                revised_row["id"]
+            ),
+            service_log_id=str(
+                log_row["log_id"]
+            ),
         )
+
         revised_row["service_log_id"] = str(
             log_row["log_id"]
         )
 
         return ExplorerDraftResponse(
-            explorer=str(revised_row["id"]),
+            explorer=str(
+                revised_row["id"]
+            ),
             explorer_created_at=(
                 self._as_optional_str(
-                    revised_row.get("created_at")
+                    revised_row.get(
+                        "created_at"
+                    )
                 )
             ),
             service_log=(
@@ -314,7 +394,8 @@ Explorer naming and version rules:
 - The first revised Explorer must append `_2`.
 - Each later revision must increment only the final revision suffix:
   `_2` becomes `_3`, `_3` becomes `_4`, and so on.
-- Revised-name format: `AI_<original generated explorer name>_<version number>`.
+- Revised-name format:
+  `AI_<original generated explorer name>_<version number>`.
 - Do not add `AI_` more than once.
 - Do not omit the numeric suffix from a revised Explorer.
 
