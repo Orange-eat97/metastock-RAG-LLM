@@ -52,8 +52,9 @@ class RagExplorerReadService:
         response = (
             self.client.table("explorer_outputs")
             .select(
-                "id, created_at, backend, model, user_query, "
-                "full_output_json, validation_passed, validation_errors, "
+                "id, created_at, updated_at, manual_edit_version, backend, "
+                "model, user_query, full_output_json, validation_passed, "
+                "validation_errors, "
                 "retrieved_refs, service_log_id, repaired_from_explorer_id, "
                 "repair_instruction, revised_from_explorer_id, "
                 "revision_instruction"
@@ -67,6 +68,50 @@ class RagExplorerReadService:
             raise ValueError(f"No explorer_outputs row found for id={explorer_id}")
 
         return self._flatten_explorer_row(response.data[0])
+
+    def get_explorers_by_ids(
+        self,
+        explorer_ids: list[str],
+    ) -> list[dict[str, Any]]:
+        cleaned_ids = list(
+            dict.fromkeys(
+                self._clean_required_text(
+                    explorer_id,
+                    "explorer_id",
+                )
+                for explorer_id in explorer_ids
+            )
+        )
+        if not cleaned_ids:
+            return []
+
+        response = (
+            self.client.table("explorer_outputs")
+            .select(
+                "id, created_at, updated_at, manual_edit_version, backend, "
+                "model, user_query, full_output_json, validation_passed, "
+                "validation_errors, retrieved_refs, service_log_id, "
+                "repaired_from_explorer_id, repair_instruction, "
+                "revised_from_explorer_id, revision_instruction"
+            )
+            .in_("id", cleaned_ids)
+            .execute()
+        )
+        rows = response.data or []
+        if not isinstance(rows, list):
+            raise RuntimeError(
+                "Supabase returned an invalid explorer_outputs response."
+            )
+        flattened_by_id = {
+            str(row.get("id")): self._flatten_explorer_row(row)
+            for row in rows
+            if isinstance(row, dict) and row.get("id")
+        }
+        return [
+            flattened_by_id[explorer_id]
+            for explorer_id in cleaned_ids
+            if explorer_id in flattened_by_id
+        ]
 
     def get_service_log(self, log_id: str) -> dict[str, Any]:
         cleaned_log_id = self._clean_required_text(log_id, "log_id")
@@ -130,6 +175,12 @@ class RagExplorerReadService:
             flattened["col_definitions"] = col_definitions
         else:
             flattened["col_definitions"] = []
+
+        assumptions = full_output.get("assumptions")
+        if isinstance(assumptions, list):
+            flattened["assumptions"] = assumptions
+        else:
+            flattened["assumptions"] = []
 
         retrieved_refs = row.get("retrieved_refs")
         if isinstance(retrieved_refs, list):

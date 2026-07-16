@@ -4,14 +4,29 @@ import os
 from typing import Any
 
 from dotenv import load_dotenv
+from numpy import identity
 from supabase import create_client, Client
 
+from src.query_identity import (
+    QueryIdentity,
+    build_query_identity,
+)
 
 load_dotenv()
 
 
 TABLE_NAME = "explorer_outputs"
 
+EXPLORER_CACHE_SELECT = (
+    "id, created_at, backend, model, user_query, "
+    "user_query_normalized, user_query_hash, "
+    "user_query_embedding_model, "
+    "full_output_json, validation_passed, "
+    "validation_errors, retrieved_refs, "
+    "service_log_id, repaired_from_explorer_id, "
+    "repair_instruction, revised_from_explorer_id, "
+    "revision_instruction"
+)
 
 def _get_supabase_client() -> Client:
     url = os.getenv("SUPABASE_URL")
@@ -38,6 +53,7 @@ def save_explorer_output_to_supabase(
     repair_instruction: str | None = None,
     revised_from_explorer_id: str | None = None,
     revision_instruction: str | None = None,
+    query_identity: QueryIdentity | None = None,
 ) -> str:
     
     """
@@ -95,10 +111,35 @@ def save_explorer_output_to_supabase(
 
     validation_passed = len(validation_errors) == 0
 
+    identity = (
+        query_identity
+        or build_query_identity(
+            user_query,
+            include_embedding=False,
+        )
+    )
+
+    if not identity.original.strip():
+        raise ValueError(
+            "query_identity.original is required."
+        )
+
     row = {
         "backend": backend,
         "model": model,
         "user_query": user_query,
+        "user_query_normalized": (
+            identity.normalized
+        ),
+        "user_query_hash": (
+            identity.query_hash
+        ),
+        "user_query_embedding": (
+            identity.embedding
+        ),
+        "user_query_embedding_model": (
+            identity.embedding_model
+        ),
 
         "explorer_name": explorer_name,
         "explorer_description": explorer_description,
@@ -171,7 +212,6 @@ def update_explorer_service_log_id(
             f"id={cleaned_explorer_id}"
         )
 
-
 def find_cached_explorer_output_by_query(
     *,
     user_query: str,
@@ -179,62 +219,237 @@ def find_cached_explorer_output_by_query(
     model: str | None = None,
 ) -> dict[str, Any] | None:
     """
-    Find the newest stored Explorer output for the exact same user_query.
+    Find the newest stored Explorer with the same normalized query.
 
-    Returns:
-        {
-            "id": "...",
-            "created_at": "...",
-            "full_output_json": {...},
-            "validation_passed": True,
-            ...
-        }
-
-    or None if no cache hit.
-
-    Exact match is intentional for now. This avoids accidentally reusing a
-    strategy for a query that only looks similar but means something different.
+    A legacy raw exact-match fallback remains so deployment can be performed
+    before every existing row has been backfilled.
     """
-    query = (user_query or "").strip()
-
-    if not query:
-        return None
+    identity = build_query_identity(
+        user_query,
+        include_embedding=False,
+    )
 
     client = _get_supabase_client()
 
     request = (
         client
         .table(TABLE_NAME)
-        .select(
-            "id, created_at, backend, model, user_query, "
-            "full_output_json, validation_passed, validation_errors, "
-            "retrieved_refs, service_log_id, repaired_from_explorer_id, "
-            "repair_instruction, revised_from_explorer_id, "
-            "revision_instruction"
+        .select(EXPLORER_CACHE_SELECT)
+        .eq(
+            "user_query_hash",
+            identity.query_hash,
         )
-        .eq("user_query", query)
-        .order("created_at", desc=True)
+        .order(
+            "created_at",
+            desc=True,
+        )
         .limit(1)
     )
 
     if require_validation_passed:
-        request = request.eq("validation_passed", True)
+        request = request.eq(
+            "validation_passed",
+            True,
+        )
 
     if model:
-        request = request.eq("model", model)
+        request = request.eq(
+            "model",
+            model,
+        )
 
     response = request.execute()
+
+    if response.data:
+        row = response.data[0]
+
+        # Verify the normalized text as well as the hash.
+        if (
+            str(
+                row.get(
+                    "user_query_normalized"
+                )
+                or ""
+            )
+            == identity.normalized
+        ):
+            row["_cache_match_type"] = (
+                "normalized_exact"
+            )
+            row["_cache_matched_query"] = (
+                row.get("user_query")
+            )
+            return _validate_cached_row(row)
+
+    legacy_request = (
+        client
+        .table(TABLE_NAME)
+        .select(EXPLORER_CACHE_SELECT)
+        .eq(
+            "user_query",
+            identity.original,
+        )
+        .order(
+            "created_at",
+            desc=True,
+        )
+        .limit(1)
+    )
+
+    if require_validation_passed:
+        legacy_request = (
+            legacy_request.eq(
+                "validation_passed",
+                True,
+            )
+        )
+
+    if model:
+        legacy_request = (
+            legacy_request.eq(
+                "model",
+                model,
+            )
+        )
+
+    legacy_response = (
+        legacy_request.execute()
+    )
+
+    if not legacy_response.data:
+        return None
+
+    row = legacy_response.data[0]
+    row["_cache_match_type"] = (
+        "legacy_exact"
+    )
+    row["_cache_matched_query"] = (
+        row.get("user_query")
+    )
+
+    return _validate_cached_row(row)
+
+
+def _validate_cached_row(
+    row: dict[str, Any],
+) -> dict[str, Any]:
+    full_output = row.get(
+        "full_output_json"
+    )
+
+    if not isinstance(
+        full_output,
+        dict,
+    ):
+        raise ValueError(
+            "Cached row "
+            f"{row.get('id')} has invalid "
+            "full_output_json."
+        )
+
+    return row
+
+
+def find_explorer_cache_row_by_id(
+    explorer_id: str,
+) -> dict[str, Any] | None:
+    cleaned_id = str(
+        explorer_id or ""
+    ).strip()
+
+    if not cleaned_id:
+        raise ValueError(
+            "explorer_id is required."
+        )
+
+    response = (
+        _get_supabase_client()
+        .table(TABLE_NAME)
+        .select(EXPLORER_CACHE_SELECT)
+        .eq("id", cleaned_id)
+        .limit(1)
+        .execute()
+    )
 
     if not response.data:
         return None
 
-    row = response.data[0]
+    return _validate_cached_row(
+        response.data[0]
+    )
 
-    full_output = row.get("full_output_json")
 
-    if not isinstance(full_output, dict):
-        raise ValueError(
-            f"Cached row {row.get('id')} has invalid full_output_json: {full_output!r}"
+def find_semantic_explorer_candidates(
+    *,
+    query_embedding: list[float],
+    embedding_model: str,
+    generation_model: str,
+    min_similarity: float,
+    match_count: int,
+) -> list[dict[str, Any]]:
+    if not query_embedding:
+        return []
+
+    response = (
+        _get_supabase_client()
+        .rpc(
+            "match_explorer_query_cache",
+            {
+                "p_query_embedding": (
+                    query_embedding
+                ),
+                "p_embedding_model": (
+                    embedding_model
+                ),
+                "p_generation_model": (
+                    generation_model
+                ),
+                "p_min_similarity": (
+                    min_similarity
+                ),
+                "p_match_count": (
+                    match_count
+                ),
+            },
+        )
+        .execute()
+    )
+
+    candidates: list[
+        dict[str, Any]
+    ] = []
+
+    for item in response.data or []:
+        if not isinstance(item, dict):
+            continue
+
+        explorer_id = str(
+            item.get("explorer_id")
+            or ""
+        ).strip()
+
+        if not explorer_id:
+            continue
+
+        try:
+            similarity = float(
+                item.get("similarity")
+            )
+        except (
+            TypeError,
+            ValueError,
+        ):
+            continue
+
+        candidates.append(
+            {
+                "explorer_id": (
+                    explorer_id
+                ),
+                "similarity": (
+                    similarity
+                ),
+            }
         )
 
-    return row
+    return candidates
