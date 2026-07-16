@@ -102,7 +102,7 @@ class RagServiceConfig(BaseModel):
         "text-embedding-3-small"
     )
 
-    query_equivalence_model: str = MODEL
+    query_equivalence_model: str = "gpt-5-mini"
 
     semantic_cache_min_similarity: (
         float
