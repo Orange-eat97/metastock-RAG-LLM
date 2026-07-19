@@ -15,10 +15,10 @@ aliases:
     weight: 1.0
 requires:
   - canonical_id: reference.system_tester_environment
-    rationale: Defines the four System Tester order-condition slots.
+    rationale: Defines the System Tester order-condition slots and manual settings.
     priority: 10
   - canonical_id: reference.simulation_functions
-    rationale: Defines current-bar constraints and the long-position-count guard.
+    rationale: Defines the position guard and fixed profit-target calculation.
     priority: 10
 registry:
   enabled: true
@@ -34,9 +34,11 @@ registry:
 
 ## Required structure
 
+- Name: `AI - <Explorer name> - System Test`
 - Order bias: long
 - Portfolio bias: single
-- Position limit enabled with maximum one position
+- Position limit enabled
+- Maximum positions: one
 - Buy enabled
 - Sell enabled
 - Sell Short disabled
@@ -46,14 +48,43 @@ registry:
 
 ## Buy condition
 
-Preserve the validated and expanded Explorer Filter as the entry logic. Add `Simulation.LongPositionCount = 0` as a current-bar guard.
+1. Load the validated stored Explorer.
+2. Expand every Explorer column reference.
+3. Preserve the expanded Filter as the entry strategy.
+4. Assign the final entry condition to `BuySignal`.
+5. Require `Simulation.LongPositionCount = 0`.
+
+Template:
+
+```metastock
+<variable declarations, when required>
+BuySignal := <expanded Explorer filter>;
+BuySignal AND Simulation.LongPositionCount = 0
+```
 
 ## Sell condition
 
-Use an explicit long exit. Reverse `Cross(A,B)` to `Cross(B,A)` only when the original entry is exactly that crossover event. For other entries, require a precise exit specification.
+Use the fixed 20 percent profit target:
+
+```metastock
+EntryPrice := C - Simulation.CurrentPositionPointDifference;
+H >= EntryPrice * 1.20
+```
+
+Do not replace this with a reverse crossover, an LLM-generated exit, a stop-loss, or a short-side signal.
+
+## User-facing instructions
+
+Tell the user exactly where each block belongs:
+
+- Buy formula → Buy Order formula editor
+- Sell formula → Sell Order formula editor
+
+Also state which General settings to select and which features to leave disabled.
 
 ## Safety rules
 
-- Never fabricate a sell rule merely to complete the object.
+- Never fabricate extra exit logic.
 - Never silently enable short orders, stops, or optimizations.
-- Never use Explorer column references in the output.
+- Never leave Explorer column references in the Buy formula.
+- Never persist a System Test generated from an invalid Explorer.

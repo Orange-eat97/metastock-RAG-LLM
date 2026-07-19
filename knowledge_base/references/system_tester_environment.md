@@ -28,35 +28,54 @@ registry:
 
 # System Tester Environment
 
-## Primer-derived rules
+## Order-condition slots
 
-A System Test may contain up to four condition formulas:
+A System Test can define four independent order conditions:
 
 - Enter Long
 - Exit Long
 - Enter Short
 - Exit Short
 
-The formula field contains the logical condition. MetaStock treats zero as false and a non-zero result as true.
+Each formula is a logical condition. Zero is false and a non-zero result is true.
 
-The System Tester has environment-specific facilities that are not valid in Explorer:
-
-- `OPT1`, `OPT2`, and other OPT variables are System Tester optimization variables.
-- `Simulation.*` values are System Tester-only current-bar values.
-
-## Long-only project mapping
-
-For the current long-only conversion:
+For the current project, the conversion is long-only:
 
 - Buy maps to Enter Long.
 - Sell maps to Exit Long.
-- Sell Short is disabled.
-- Buy to Cover is disabled.
-- Stops and Optimizations remain disabled.
+- Sell Short remains disabled.
+- Buy to Cover remains disabled.
+- Stops remain disabled.
+- Optimizations remain disabled.
 
-## Constraints
+## Manual-entry locations
 
-- Do not copy `ColA`, `ColB`, or other Explorer column references into a System Test.
-- Expand each referenced Explorer column into its underlying formula first.
-- Do not add short-side conditions to a long-only test.
-- Do not add OPT variables when optimizations are disabled.
+When presenting a generated System Test to a user:
+
+1. Put the generated entry formula in the Buy Order formula editor.
+2. Put the generated exit formula in the Sell Order formula editor.
+3. Enable Buy and Sell.
+4. Leave Sell Short and Buy to Cover disabled.
+5. Set Order Bias to Long Orders.
+6. Set Portfolio Bias to Single.
+7. Enable the position limit and set the maximum to one position.
+
+## Explorer conversion constraints
+
+Explorer columns are not available as `ColA`-style variables in a System Test. Expand every referenced Explorer column into its formula before producing the Buy condition.
+
+Do not copy any of these into a System Test formula:
+
+- `Column A:` labels
+- `Filter:` labels
+- `ColA` through `ColL`
+- Explorer-only presentation text
+
+## Environment-specific facilities
+
+The System Tester supports facilities that are not valid in Explorer:
+
+- `OPT1`, `OPT2`, and other `OPT` variables are optimization variables.
+- `Simulation.*` values describe the current simulation state.
+
+Do not introduce optimization variables while Optimizations are disabled.

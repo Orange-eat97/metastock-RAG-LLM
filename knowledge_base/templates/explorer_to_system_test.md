@@ -26,11 +26,21 @@ registry:
 
 # Explorer to System Test Conversion
 
+## Source requirement
+
+Convert only a stored Explorer whose deterministic validation has passed.
+
+The System Test name is:
+
+```text
+AI - <Explorer name> - System Test
+```
+
 ## Entry conversion
 
-An Explorer Filter and a System Tester order formula are both logical conditions. Preserve the Explorer Filter as the long-entry strategy after expanding all Explorer column references.
+An Explorer Filter and a System Tester order formula are both logical conditions. Preserve the validated Explorer Filter as the long-entry strategy after expanding every `ColA`-style reference.
 
-Example:
+Example Explorer:
 
 ```text
 Column A: RSI(14)
@@ -38,35 +48,53 @@ Column B: Mov(C,50,S)
 Filter: ColA < 30 AND C > ColB
 ```
 
-Expanded entry condition:
+Expanded condition:
 
 ```metastock
 RSI(14) < 30 AND C > Mov(C,50,S)
 ```
 
-One-position Buy condition:
+Buy Order formula:
 
 ```metastock
 BuySignal := RSI(14) < 30 AND C > Mov(C,50,S);
 BuySignal AND Simulation.LongPositionCount = 0
 ```
 
-## Exit conversion
+Paste the complete Buy formula into the Buy Order formula editor.
 
-The exit condition is a separate strategy decision. A reverse crossover is unambiguous only when the entry event is a simple crossover:
+## Fixed exit conversion
+
+The current project uses one deterministic Sell condition for every generated System Test:
 
 ```metastock
-Enter Long: Cross(A,B)
-Exit Long: Cross(B,A)
+EntryPrice := C - Simulation.CurrentPositionPointDifference;
+H >= EntryPrice * 1.20
 ```
 
-For compound filters or state conditions, do not invent an exit. Require an explicit sell formula or a precise conversion instruction.
+Paste the complete formula into the Sell Order formula editor.
+
+This is a 20 percent profit target. It does not add a stop-loss, short-side order, optimization, or alternative exit rule.
+
+## General settings
+
+- Order Bias: Long Orders
+- Portfolio Bias: Single
+- Position limit: enabled
+- Maximum simultaneous positions: 1
+- Buy: enabled
+- Sell: enabled
+- Sell Short: disabled
+- Buy to Cover: disabled
+- Stops: disabled
+- Optimizations: disabled
 
 ## Forbidden output
 
 - `ColA` through `ColL`
 - `Filter:` labels
 - `Column A:` labels
-- positive/future `Ref()` offsets
-- OPT variables when optimization is disabled
-- short-side formulas in a long-only conversion
+- positive or future `Ref()` offsets
+- `OPT` variables
+- short-side formulas
+- invented stop-loss logic
