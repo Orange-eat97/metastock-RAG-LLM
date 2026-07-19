@@ -17,15 +17,6 @@ class ExplorerEditConflictError(RuntimeError):
     """Raised when an Explorer changed after the UI card was loaded."""
 
 
-class ExplorerValidationError(ValueError):
-    """Raised when deterministic MetaStock validation rejects a manual edit."""
-
-    def __init__(self, errors: list[str]) -> None:
-        cleaned = [str(error).strip() for error in errors if str(error).strip()]
-        self.errors = cleaned or ["The Explorer failed deterministic validation."]
-        super().__init__("\n".join(self.errors))
-
-
 class RagExplorerUpdateService:
     """
     Controlled write service for manual Explorer-card edits.
@@ -78,15 +69,7 @@ class RagExplorerUpdateService:
 
         updated_output = dict(full_output)
         updated_output.update(patch)
-        validation_messages = validate_explorer_output(updated_output)
-        hard_errors = [
-            str(message)
-            for message in validation_messages
-            if not str(message).startswith("Warning:")
-        ]
-        if hard_errors:
-            raise ExplorerValidationError(hard_errors)
-
+        validation_errors = validate_explorer_output(updated_output)
         updated_at = datetime.now(timezone.utc).isoformat()
 
         response = (
@@ -94,8 +77,8 @@ class RagExplorerUpdateService:
             .update(
                 {
                     "full_output_json": updated_output,
-                    "validation_passed": True,
-                    "validation_errors": validation_messages,
+                    "validation_passed": len(validation_errors) == 0,
+                    "validation_errors": validation_errors,
                     "updated_at": updated_at,
                     "manual_edit_version": current_version + 1,
                 }
